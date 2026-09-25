@@ -102,8 +102,12 @@ directory read-only and NanoClaw removes each file after sending. Both
 containers use UID 1000, so both bind sources must be owned by that UID.
 `SIGNAL_IMAGE` in `.env.example` selects the official signal-cli 0.14.8 image
 by an immutable digest. Its `--version` command was checked locally without an
-account. Starting a second daemon with a copied live account would also
-be unsafe; use a test identity for the first runtime check.
+account. Signal's `/tmp` tmpfs is mounted `exec` (still `nosuid,nodev`)
+because signal-cli loads its native libsignal library from there; with
+Docker's default `noexec` the daemon exits at startup and restarts in a loop.
+A TCP healthcheck on the JSON-RPC port makes such a loop show as `unhealthy`.
+Starting a second daemon with a copied live account would also be unsafe; use
+a test identity for the first runtime check.
 
 `ONECLI_DB_PASSWORD_FILE` must point to an operator-owned file outside Git
 containing exactly 64 hexadecimal characters (for example, the output of

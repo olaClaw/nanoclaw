@@ -110,8 +110,17 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    # signal-cli unpacks its libsignal JNI library into /tmp and maps it
+    # executable. Docker mounts tmpfs noexec by default, which makes the daemon
+    # exit at startup with "failed to map segment".
     tmpfs:
-      - /tmp:mode=1777
+      - /tmp:exec,nosuid,nodev,mode=1777
+    healthcheck:
+      test: [CMD, bash, -c, 'exec 3<>/dev/tcp/127.0.0.1/7583']
+      interval: 10s
+      timeout: 3s
+      start_period: 30s
+      retries: 3
     volumes:
       - type: bind
         source: /srv/nanoclaw/signal
