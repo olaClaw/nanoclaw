@@ -115,7 +115,7 @@ def forbidden_app_path(parts):
     )
 
 
-def check_archive(archive, base_layers, accepted, expected_revision):
+def check_archive(archive, base_layers, accepted, expected_revision, expected_tree=None):
     counts = Counter()
     with tarfile.open(archive, "r:*") as outer:
         members = {member.name: member for member in outer}
@@ -132,6 +132,8 @@ def check_archive(archive, base_layers, accepted, expected_revision):
         revision = labels.get("org.opencontainers.image.revision", "")
         if revision != expected_revision or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision):
             counts["missing-or-wrong-revision"] += 1
+        if expected_tree is not None and labels.get("org.olaclaw.source.tree") != expected_tree:
+            counts["missing-or-wrong-tree"] += 1
         for entry in image_config.get("Env", []):
             name, separator, value = entry.partition("=")
             if separator and value and re.search(r"(?:PASSWORD|SECRET|TOKEN|API_KEY|PRIVATE_KEY|CREDENTIAL)", name, re.I):
@@ -186,6 +188,7 @@ def main():
     parser.add_argument("--base-image")
     parser.add_argument("--runtime", default="docker")
     parser.add_argument("--revision", required=True)
+    parser.add_argument("--tree")
     args = parser.parse_args()
     try:
         if args.archive:
@@ -202,13 +205,13 @@ def main():
             base_layers = len(base)
         accepted = accepted_upstream_candidates()
         if args.archive:
-            counts = check_archive(archive, base_layers, accepted, args.revision)
+            counts = check_archive(archive, base_layers, accepted, args.revision, args.tree)
         else:
             with tempfile.TemporaryDirectory(prefix="nanoclaw-image-audit-") as temp:
                 archive = Path(temp) / "image.tar"
                 subprocess.run([args.runtime, "image", "save", "-o", str(archive), args.image],
                                check=True, capture_output=True)
-                counts = check_archive(archive, base_layers, accepted, args.revision)
+                counts = check_archive(archive, base_layers, accepted, args.revision, args.tree)
         print("privacy image audit:", "pass" if not counts else "blocked")
         print(json.dumps({"categories": counts, "new_layers": "checked"}))
         return 0 if not counts else 1

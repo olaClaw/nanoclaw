@@ -44,6 +44,15 @@ export function getCodeVersion(projectRoot: string = process.cwd()): string {
 
 /** Git identity of the exact checkout the host is about to run. */
 export function getCodeIdentity(projectRoot: string = process.cwd()): CodeIdentity {
+  const version = getCodeVersion(projectRoot);
+  const imageCommit = process.env.NANOCLAW_SOURCE_REVISION;
+  const imageTree = process.env.NANOCLAW_SOURCE_TREE;
+  if (imageCommit !== undefined || imageTree !== undefined) {
+    if (!imageCommit || !imageTree || !/^[0-9a-f]{40}$/.test(imageCommit) || !/^[0-9a-f]{40}$/.test(imageTree)) {
+      throw new Error('Image source identity is incomplete or invalid');
+    }
+    return { version, commit: imageCommit, tree: imageTree };
+  }
   const git = (rev: string): string =>
     execFileSync('git', ['rev-parse', '--verify', rev], {
       cwd: projectRoot,
@@ -51,7 +60,6 @@ export function getCodeIdentity(projectRoot: string = process.cwd()): CodeIdenti
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
 
-  const version = getCodeVersion(projectRoot);
   try {
     return { version, commit: git('HEAD'), tree: git('HEAD^{tree}') };
   } catch {
@@ -106,6 +114,7 @@ export function isUpgradeCurrent(projectRoot: string = process.cwd()): boolean {
     const code = getCodeIdentity(projectRoot);
     if (state.version !== code.version) return false;
     if (code.commit === 'unknown' || code.tree === 'unknown') {
+      if (process.env.NANOCLAW_AGENT_ASSETS_IN_IMAGE === 'true') return false;
       // Git cannot identify this checkout (no git binary, or a tree
       // exported/mounted without .git). Commit and tree cannot strengthen
       // the check here — the sanctioned recovery path in this world records
@@ -139,7 +148,12 @@ export function markerPath(): string {
 export function enforceUpgradeTripwire(): void {
   if (isUpgradeCurrent()) return;
 
-  const code = getCodeIdentity();
+  let code: CodeIdentity;
+  try {
+    code = getCodeIdentity();
+  } catch {
+    code = { version: getCodeVersion(), commit: 'unknown', tree: 'unknown' };
+  }
   const recorded = readUpgradeState();
   const gitUnavailable = code.commit === 'unknown' || code.tree === 'unknown';
   const exactCheckoutChanged =

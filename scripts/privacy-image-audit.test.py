@@ -24,10 +24,10 @@ def tar_bytes(files):
     return output.getvalue()
 
 
-def image_archive(destination, layers, revision=REVISION, env=None, healthcheck=None):
+def image_archive(destination, layers, revision=REVISION, env=None, healthcheck=None, tree=None):
     layer_names = ["layer" + str(index) + "/layer.tar" for index in range(len(layers))]
     config = {
-        "config": {"Env": env or ["NODE_ENV=production"], "Labels": {"org.opencontainers.image.revision": revision}, "Healthcheck": healthcheck},
+        "config": {"Env": env or ["NODE_ENV=production"], "Labels": {"org.opencontainers.image.revision": revision, **({"org.olaclaw.source.tree": tree} if tree else {})}, "Healthcheck": healthcheck},
         "history": [{"created_by": "fixture"}],
     }
     manifest = [{"Config": "config.json", "Layers": layer_names, "RepoTags": ["fixture:local"]}]
@@ -67,6 +67,14 @@ class ImageAuditTests(unittest.TestCase):
             counts = AUDIT.check_archive(archive, 0, set(), REVISION)
             self.assertGreater(counts.get("missing-or-wrong-revision", 0), 0)
             self.assertRaises(ValueError, AUDIT.image_path, "../outside")
+
+    def test_requires_matching_source_tree_when_supplied(self):
+        with tempfile.TemporaryDirectory() as temp:
+            archive = Path(temp) / "image.tar"
+            image_archive(archive, [{"app/src/index.js": "clean"}], tree="b" * 40)
+            self.assertEqual(AUDIT.check_archive(archive, 0, set(), REVISION, "b" * 40), {})
+            counts = AUDIT.check_archive(archive, 0, set(), REVISION, "c" * 40)
+            self.assertGreater(counts.get("missing-or-wrong-tree", 0), 0)
 
     def test_rejects_secret_environment_assignment(self):
         with tempfile.TemporaryDirectory() as temp:

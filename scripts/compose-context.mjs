@@ -17,9 +17,12 @@ const fixed = {
     'pnpm-workspace.yaml',
     'tsconfig.json',
     'container/CLAUDE.md',
+    'deploy/bootstrap.mjs',
+    'deploy/check-release.mjs',
     'deploy/host.Dockerfile',
     'deploy/healthcheck.mjs',
     'deploy/onecli-egress.mjs',
+    'deploy/release-manifest.mjs',
   ],
   agent: ['deploy/agent.Dockerfile'],
   broker: [

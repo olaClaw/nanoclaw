@@ -4,5 +4,7 @@ WORKDIR /app
 COPY .claude/skills/add-infomaniak-mail-readonly/infomaniak_mail_broker.py ./infomaniak-mail.py
 COPY deploy/nextcloud-calendar-broker.py ./nextcloud-calendar.py
 ARG SOURCE_REVISION
+ARG SOURCE_TREE
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
+LABEL org.olaclaw.source.tree="${SOURCE_TREE}"
 USER 1000:1000

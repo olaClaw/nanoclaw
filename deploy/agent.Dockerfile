@@ -7,5 +7,7 @@ USER root
 COPY --chown=node:node container/agent-runner/src/ /app/src/
 COPY --chown=node:node container/skills/ /app/skills/
 ARG SOURCE_REVISION
+ARG SOURCE_TREE
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
+LABEL org.olaclaw.source.tree="${SOURCE_TREE}"
 USER node

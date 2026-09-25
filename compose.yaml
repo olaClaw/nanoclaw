@@ -25,6 +25,13 @@ services:
       NANOCLAW_AGENT_ASSETS_IN_IMAGE: 'true'
       NANOCLAW_INSTALL_ID: ${NANOCLAW_INSTALL_ID:?Set NANOCLAW_INSTALL_ID}
       CONTAINER_IMAGE: ${NANOCLAW_AGENT_IMAGE:?Set NANOCLAW_AGENT_IMAGE from the same commit}
+      NANOCLAW_HOST_IMAGE: ${NANOCLAW_HOST_IMAGE:?Set NANOCLAW_HOST_IMAGE from the release manifest}
+      NANOCLAW_AGENT_IMAGE: ${NANOCLAW_AGENT_IMAGE:?Set NANOCLAW_AGENT_IMAGE from the release manifest}
+      NANOCLAW_BROKER_IMAGE: ${NANOCLAW_BROKER_IMAGE:?Set NANOCLAW_BROKER_IMAGE from the release manifest}
+      ONECLI_IMAGE: ${ONECLI_IMAGE:?Set ONECLI_IMAGE from the release manifest}
+      POSTGRES_IMAGE: ${POSTGRES_IMAGE:?Set POSTGRES_IMAGE from the release manifest}
+      SIGNAL_IMAGE: ${SIGNAL_IMAGE:?Set SIGNAL_IMAGE from the release manifest}
+      NANOCLAW_RELEASE_MANIFEST: /srv/nanoclaw/release.json
       NANOCLAW_GATEWAY_PROVIDER: onecli
       NANOCLAW_EGRESS_LOCKDOWN: 'true'
       NANOCLAW_EGRESS_NETWORK: nanoclaw-egress
@@ -77,6 +84,12 @@ services:
       - type: bind
         source: ./.env
         target: /srv/nanoclaw/.env
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/nanoclaw/release.json
+        target: /srv/nanoclaw/release.json
         read_only: true
         bind:
           create_host_path: false

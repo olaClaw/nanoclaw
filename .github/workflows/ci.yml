@@ -37,6 +37,8 @@ jobs:
           ONECLI_DB_PASSWORD_FILE="$example_secret" docker compose --env-file .env.example --profile core-preview config --quiet
       - name: Test host healthcheck
         run: node --test deploy/healthcheck.test.mjs deploy/onecli-egress.test.mjs
+      - name: Test Compose release and bootstrap gates
+        run: node deploy/release-manifest.test.mjs
       - name: Test read-only brokers
         run: |
           python3 .claude/skills/add-infomaniak-mail-readonly/test_infomaniak_mail_broker.py
@@ -154,22 +156,23 @@ jobs:
           agent_context="$(node scripts/compose-context.mjs --stage agent)"
           broker_context="$(node scripts/compose-context.mjs --stage broker)"
           lock_sha="$(sha256sum "$base_context/agent-runner/bun.lock" | cut -d' ' -f1)"
-          docker build --quiet --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
+          source_tree="$(git rev-parse 'HEAD^{tree}')"
+          docker build --quiet --build-arg "SOURCE_REVISION=$GITHUB_SHA" --build-arg "SOURCE_TREE=$source_tree" \
             -t nanoclaw-host:review "$host_context" >/dev/null
           docker image inspect --format '{{json .Config.Healthcheck}}' nanoclaw-host:review | grep -Fq deploy/healthcheck.mjs
           python3 scripts/privacy-image-audit.py --image nanoclaw-host:review \
-            --base-image node:22-slim --revision "$GITHUB_SHA"
+            --base-image node:22-slim --revision "$GITHUB_SHA" --tree "$source_tree"
           docker build --quiet --build-arg "AGENT_RUNNER_LOCK_SHA256=$lock_sha" \
             -t nanoclaw-agent-base:review "$base_context" >/dev/null
           docker build --quiet --build-arg "BASE_IMAGE=nanoclaw-agent-base:review" \
-            --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
+            --build-arg "SOURCE_REVISION=$GITHUB_SHA" --build-arg "SOURCE_TREE=$source_tree" \
             -t nanoclaw-agent:review "$agent_context" >/dev/null
           python3 scripts/privacy-image-audit.py --image nanoclaw-agent:review \
-            --base-image nanoclaw-agent-base:review --revision "$GITHUB_SHA"
-          docker build --quiet --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
+            --base-image nanoclaw-agent-base:review --revision "$GITHUB_SHA" --tree "$source_tree"
+          docker build --quiet --build-arg "SOURCE_REVISION=$GITHUB_SHA" --build-arg "SOURCE_TREE=$source_tree" \
             -t nanoclaw-brokers:review "$broker_context" >/dev/null
           python3 scripts/privacy-image-audit.py --image nanoclaw-brokers:review \
-            --base-image python:3.12-slim --revision "$GITHUB_SHA"
+            --base-image python:3.12-slim --revision "$GITHUB_SHA" --tree "$source_tree"
 
   # Repository rules require exact `ci`; always run it so matrix failures remain blocking.
   ci:

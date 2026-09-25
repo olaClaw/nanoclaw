@@ -3,8 +3,9 @@
 `compose.yaml` describes NanoClaw, PostgreSQL, OneCLI, Signal, two read-only
 brokers and a TCP-only egress proxy. They are behind the `core-preview` profile so a plain
 `docker compose up` does not start a partial stack. It has **not** been deployed
-or tested against an operational gateway or calendar. Bootstrap and the
-administrative panel still need Compose integration.
+or tested against an operational gateway or calendar. The bootstrap gate is
+implemented but not yet exercised on a complete stack. The administrative
+panel still needs Compose integration.
 
 The image runs from `/srv/nanoclaw`, matching the absolute path on the Docker
 daemon host. This matters because NanoClaw asks that daemon to bind-mount
@@ -16,20 +17,36 @@ ignored `.env` file read-only into the image and mounts the Docker socket only
 into the host service. Set `DOCKER_SOCKET_GID` in `.env` to the socket's group
 ID; possession of the socket grants Docker daemon control.
 
-`.env.example` is a template, not a working configuration. Replace its image
-references with images from the same reviewed commit before deployment. The
-host image embeds its revision; before creating a new agent session, the Docker
-driver checks that the agent image has the same revision label. Images with a
-missing or different label are refused. Local images built from uncommitted
+`.env.example` is a template, not a working configuration. A release manifest
+lists six images by immutable `@sha256:` reference: host, agent, brokers,
+OneCLI, PostgreSQL and Signal. After image publication, run
+`node scripts/compose-release.mjs create` with `--output` and one option for
+each of those six image names, then install the generated file at
+`/srv/nanoclaw/release.json`. The generator requires a clean checkout and
+records its Git commit, tree and package version. Set the six image entries in
+the private `.env` to exactly those manifest references. The host checks all
+six local images and requires matching commit/tree labels on the three fork
+images before startup; before creating an agent session, its Docker driver
+also checks the agent revision label. Local images built from uncommitted
 changes are only test artifacts, never release images.
+
+For a **fresh** data directory, after pulling all six images and preparing
+the bind sources, run `docker compose --env-file .env --profile core-preview run
+--rm --no-deps nanoclaw node deploy/bootstrap.mjs`. This verifies the manifest
+and image labels, then writes `data/upgrade-state.json` with the same commit
+and tree. It refuses a nonempty or missing data directory and never overwrites
+an existing marker. The host's startup gate rejects a missing or mismatched
+marker; in image mode it no longer accepts a version-only fallback. This
+bootstrap is not an updater or an import path for existing data.
 
 The image healthcheck connects to the live `data/ncl.sock` Unix socket. It
 detects a running CLI listener, but does not establish that the gateway,
 channels or model endpoint are healthy. The final stack needs service-level
 health checks, network isolation and a bootstrap that records the installed
-release before the host can start. Until those are implemented and tested,
-validate the file with synthetic values and do not run the preview profile on
-the installation.
+release before the host can start. Although the static gates are implemented,
+the complete stack and its recovery path have not been tested. Validate the
+file with synthetic values and do not run the preview profile on the
+installation.
 
 The `agent-egress` network has the fixed name `nanoclaw-egress` and is internal.
 Compose creates it before NanoClaw starts. Agents can resolve the two brokers
@@ -64,8 +81,8 @@ available and keep the credential out of agent containers.
 OneCLI and PostgreSQL use separate persistent volumes. PostgreSQL only joins
 the internal `db` network; OneCLI joins `db` and `gateway`. The NanoClaw host
 joins `gateway` and forces its agent sessions onto a separate internal egress
-network. Only the `onecli-egress` proxy is attached to that agent network at
-spawn, and it forwards TCP to OneCLI's gateway port; the agent cannot reach
+network. The `onecli-egress` proxy joins that agent network through Compose
+and forwards TCP to OneCLI's gateway port; the agent cannot reach
 OneCLI's dashboard through that proxy. The OneCLI dashboard is bound only to
 the server's loopback address for this preview. No Postgres or gateway port is
 published on the server.

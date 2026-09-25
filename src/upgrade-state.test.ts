@@ -22,9 +22,15 @@ import {
 
 beforeEach(() => {
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
+  delete process.env.NANOCLAW_SOURCE_REVISION;
+  delete process.env.NANOCLAW_SOURCE_TREE;
+  delete process.env.NANOCLAW_AGENT_ASSETS_IN_IMAGE;
 });
 afterEach(() => {
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
+  delete process.env.NANOCLAW_SOURCE_REVISION;
+  delete process.env.NANOCLAW_SOURCE_TREE;
+  delete process.env.NANOCLAW_AGENT_ASSETS_IN_IMAGE;
 });
 
 describe('upgrade-state', () => {
@@ -65,6 +71,37 @@ describe('upgrade-state', () => {
         tree: 'unknown',
       });
       expect(isUpgradeCurrent(projectRoot)).toBe(true);
+    } finally {
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('uses the embedded image commit and tree without Git and rejects incomplete identity', () => {
+    const projectRoot = fs.mkdtempSync('/tmp/nanoclaw-image-identity-');
+    fs.writeFileSync(path.join(projectRoot, 'package.json'), JSON.stringify({ version: '1.2.3' }));
+    try {
+      process.env.NANOCLAW_SOURCE_REVISION = 'a'.repeat(40);
+      process.env.NANOCLAW_SOURCE_TREE = 'b'.repeat(40);
+      expect(getCodeIdentity(projectRoot)).toEqual({ version: '1.2.3', commit: 'a'.repeat(40), tree: 'b'.repeat(40) });
+      expect(writeUpgradeState({ via: 'compose-bootstrap', projectRoot })).toMatchObject(getCodeIdentity(projectRoot));
+      expect(isUpgradeCurrent(projectRoot)).toBe(true);
+      process.env.NANOCLAW_SOURCE_TREE = 'c'.repeat(40);
+      expect(isUpgradeCurrent(projectRoot)).toBe(false);
+      delete process.env.NANOCLAW_SOURCE_TREE;
+      expect(() => getCodeIdentity(projectRoot)).toThrow('Image source identity');
+      expect(isUpgradeCurrent(projectRoot)).toBe(false);
+    } finally {
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses the version-only fallback when image mode is enabled', () => {
+    const projectRoot = fs.mkdtempSync('/tmp/nanoclaw-image-no-git-');
+    fs.writeFileSync(path.join(projectRoot, 'package.json'), JSON.stringify({ version: '1.2.3' }));
+    try {
+      process.env.NANOCLAW_AGENT_ASSETS_IN_IMAGE = 'true';
+      writeUpgradeState({ via: 'test', projectRoot });
+      expect(isUpgradeCurrent(projectRoot)).toBe(false);
     } finally {
       fs.rmSync(projectRoot, { recursive: true, force: true });
     }
