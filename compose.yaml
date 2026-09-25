@@ -1,4 +1,4 @@
-# Gateway and Signal preview. Brokers and bootstrap are still in progress.
+# Core services preview. Bootstrap and release selection are still in progress.
 # The profile prevents an accidental `docker compose up` from starting it.
 services:
   nanoclaw:
@@ -9,6 +9,10 @@ services:
         condition: service_healthy
       signal-cli:
         condition: service_started
+      infomaniak-mail:
+        condition: service_healthy
+      nextcloud-calendar:
+        condition: service_healthy
     init: true
     restart: unless-stopped
     read_only: true
@@ -175,7 +179,74 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
-    networks: [gateway]
+    networks: [gateway, agent-egress]
+
+  infomaniak-mail:
+    profiles: [core-preview]
+    image: ${NANOCLAW_BROKER_IMAGE:?Set NANOCLAW_BROKER_IMAGE from the same commit}
+    command: [python, /app/infomaniak-mail.py, serve, --config, /run/private/mail.json]
+    user: '1000:1000'
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:mode=1777
+    volumes:
+      - type: bind
+        source: ${INFOMANIAK_BROKER_CONFIG_FILE:?Set INFOMANIAK_BROKER_CONFIG_FILE outside Git}
+        target: /run/private/mail.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${INFOMANIAK_DOWNLOAD_DIR:?Set INFOMANIAK_DOWNLOAD_DIR outside Git}
+        target: ${INFOMANIAK_DOWNLOAD_DIR:?Set INFOMANIAK_DOWNLOAD_DIR outside Git}
+        bind:
+          create_host_path: false
+    healthcheck:
+      test:
+        [
+          CMD,
+          python,
+          -c,
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18765/health', timeout=2).close()",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks: [broker-outbound, agent-egress]
+
+  nextcloud-calendar:
+    profiles: [core-preview]
+    image: ${NANOCLAW_BROKER_IMAGE:?Set NANOCLAW_BROKER_IMAGE from the same commit}
+    command: [python, /app/nextcloud-calendar.py, --config, /run/private/calendar.json]
+    user: '1000:1000'
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:mode=1777
+    volumes:
+      - type: bind
+        source: ${NEXTCLOUD_BROKER_CONFIG_FILE:?Set NEXTCLOUD_BROKER_CONFIG_FILE outside Git}
+        target: /run/private/calendar.json
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test:
+        [
+          CMD,
+          python,
+          -c,
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18766/health', timeout=2).close()",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks: [broker-outbound, agent-egress]
 
 secrets:
   onecli_db_password:
@@ -192,3 +263,8 @@ networks:
     internal: true
   channels:
     driver: bridge
+  broker-outbound:
+    driver: bridge
+  agent-egress:
+    name: nanoclaw-egress
+    internal: true

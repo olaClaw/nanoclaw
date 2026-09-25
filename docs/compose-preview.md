@@ -1,10 +1,10 @@
 # Compose core preview
 
-`compose.yaml` describes NanoClaw, PostgreSQL, OneCLI, Signal and a TCP-only egress
-proxy. They are behind the `core-preview` profile so a plain
+`compose.yaml` describes NanoClaw, PostgreSQL, OneCLI, Signal, two read-only
+brokers and a TCP-only egress proxy. They are behind the `core-preview` profile so a plain
 `docker compose up` does not start a partial stack. It has **not** been deployed
-or tested against an operational gateway. The two read-only brokers,
-bootstrap and the administrative panel still need Compose integration.
+or tested against an operational gateway or calendar. Bootstrap and the
+administrative panel still need Compose integration.
 
 The image runs from `/srv/nanoclaw`, matching the absolute path on the Docker
 daemon host. This matters because NanoClaw asks that daemon to bind-mount
@@ -30,6 +30,36 @@ health checks, network isolation and a bootstrap that records the installed
 release before the host can start. Until those are implemented and tested,
 validate the file with synthetic values and do not run the preview profile on
 the installation.
+
+The `agent-egress` network has the fixed name `nanoclaw-egress` and is internal.
+Compose creates it before NanoClaw starts. Agents can resolve the two brokers
+there as `infomaniak-mail:18765` and `nextcloud-calendar:18766`. Broker
+containers also join `broker-outbound` to reach IMAP and HTTPS CalDAV; neither
+MCP port is published on the server. Agent MCP registrations must use those
+service names instead of the previous Docker bridge address. Each broker
+requires a bearer capability in the agent group's MCP headers; the capabilities
+and upstream passwords stay in private runtime files and must never enter Git.
+
+`NANOCLAW_BROKER_IMAGE` is built only from the three reviewed files in the
+broker context. The Infomaniak configuration is the existing broker's `0600`
+JSON file, with `bind` set to `0.0.0.0`, `port` to `18765`, and `download_dir`
+equal to `INFOMANIAK_DOWNLOAD_DIR`. That download directory must be inside the
+selected group's persistent directory, owned by UID 1000 and mounted at the
+same absolute host path in the broker. The agent sees the corresponding group
+directory at `/workspace/agent`. The broker's IMAP password is
+available only inside its container. Its methods use read-only `INBOX` and
+`BODY.PEEK` and expose no mail mutation tool.
+
+The Nextcloud configuration is a separate `0600` JSON file owned by UID 1000,
+with `calendar_url`, `username`, `app_password` and `broker_token` fields.
+`calendar_url` must be an HTTPS calendar collection URL ending in `/`; the
+broker verifies TLS and sends only a bounded CalDAV `REPORT` request. Its
+single MCP tool, `nextcloud_list_events`, accepts timezone-qualified `start`
+and `end` timestamps for a range of at most 93 days. It limits the response
+to 50 events, 16 KiB per event and 2 MiB total. The bearer capability controls
+access to this read-only broker, but it does not make the upstream Nextcloud
+credential read-only. Use an account with the narrowest calendar access
+available and keep the credential out of agent containers.
 
 OneCLI and PostgreSQL use separate persistent volumes. PostgreSQL only joins
 the internal `db` network; OneCLI joins `db` and `gateway`. The NanoClaw host

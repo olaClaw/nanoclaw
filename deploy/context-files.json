@@ -350,5 +350,10 @@
     "container/skills/self-customize/SKILL.md",
     "container/skills/welcome/SKILL.md",
     "deploy/agent.Dockerfile"
+  ],
+  "broker": [
+    ".claude/skills/add-infomaniak-mail-readonly/infomaniak_mail_broker.py",
+    "deploy/brokers.Dockerfile",
+    "deploy/nextcloud-calendar-broker.py"
   ]
 }

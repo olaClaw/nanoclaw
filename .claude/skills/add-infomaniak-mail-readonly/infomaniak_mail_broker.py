@@ -739,7 +739,8 @@ def handler_class(config: Config, broker: MailBroker) -> type[BaseHTTPRequestHan
             self.wfile.write(body)
 
         def log_message(self, fmt: str, *args: Any) -> None:
-            sys.stderr.write(f"[infomaniak-mail] {self.address_string()} {fmt % args}\n")
+            # Request paths and peer addresses may identify the installation.
+            pass
 
     return Handler
 

@@ -17,9 +17,9 @@ function filesUnder(root) {
   return result.sort();
 }
 
-test('stages exactly the reviewed host and agent inputs', () => {
+test('stages exactly the reviewed host, agent and broker inputs', () => {
   const manifest = verifyContextManifest();
-  for (const kind of ['host', 'agent']) {
+  for (const kind of ['host', 'agent', 'broker']) {
     const context = stageContext(kind, manifest);
     try {
       const expected = manifest[kind]

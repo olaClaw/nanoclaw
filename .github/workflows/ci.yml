@@ -37,6 +37,10 @@ jobs:
           ONECLI_DB_PASSWORD_FILE="$example_secret" docker compose --env-file .env.example --profile core-preview config --quiet
       - name: Test host healthcheck
         run: node --test deploy/healthcheck.test.mjs deploy/onecli-egress.test.mjs
+      - name: Test read-only brokers
+        run: |
+          python3 .claude/skills/add-infomaniak-mail-readonly/test_infomaniak_mail_broker.py
+          python3 deploy/nextcloud-calendar-broker.test.py
       - name: Test redacted image-layer audit
         run: python3 scripts/privacy-image-audit.test.py
 
@@ -135,17 +139,20 @@ jobs:
           base_context="$(node scripts/privacy-agent-context.mjs --stage container)"
           host_context=""
           agent_context=""
+          broker_context=""
           cleanup() {
             status=$?
             trap - EXIT
             if [ -n "$agent_context" ]; then node scripts/compose-context.mjs --cleanup "$agent_context" || status=1; fi
             if [ -n "$host_context" ]; then node scripts/compose-context.mjs --cleanup "$host_context" || status=1; fi
+            if [ -n "$broker_context" ]; then node scripts/compose-context.mjs --cleanup "$broker_context" || status=1; fi
             node scripts/privacy-agent-context.mjs --cleanup "$base_context" || status=1
             exit "$status"
           }
           trap cleanup EXIT
           host_context="$(node scripts/compose-context.mjs --stage host)"
           agent_context="$(node scripts/compose-context.mjs --stage agent)"
+          broker_context="$(node scripts/compose-context.mjs --stage broker)"
           lock_sha="$(sha256sum "$base_context/agent-runner/bun.lock" | cut -d' ' -f1)"
           docker build --quiet --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
             -t nanoclaw-host:review "$host_context" >/dev/null
@@ -159,6 +166,10 @@ jobs:
             -t nanoclaw-agent:review "$agent_context" >/dev/null
           python3 scripts/privacy-image-audit.py --image nanoclaw-agent:review \
             --base-image nanoclaw-agent-base:review --revision "$GITHUB_SHA"
+          docker build --quiet --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
+            -t nanoclaw-brokers:review "$broker_context" >/dev/null
+          python3 scripts/privacy-image-audit.py --image nanoclaw-brokers:review \
+            --base-image python:3.12-slim --revision "$GITHUB_SHA"
 
   # Repository rules require exact `ci`; always run it so matrix failures remain blocking.
   ci:

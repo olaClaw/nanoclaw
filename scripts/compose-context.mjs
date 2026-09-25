@@ -22,6 +22,11 @@ const fixed = {
     'deploy/onecli-egress.mjs',
   ],
   agent: ['deploy/agent.Dockerfile'],
+  broker: [
+    '.claude/skills/add-infomaniak-mail-readonly/infomaniak_mail_broker.py',
+    'deploy/brokers.Dockerfile',
+    'deploy/nextcloud-calendar-broker.py',
+  ],
 };
 
 function walkFiles(base) {
@@ -62,6 +67,7 @@ function discovered(kind) {
   if (kind === 'agent') {
     return [...new Set([...fixed.agent, ...productionFiles('container/agent-runner/src'), ...skills])].sort();
   }
+  if (kind === 'broker') return [...fixed.broker].sort();
   throw new Error('Unknown context');
 }
 
@@ -87,7 +93,7 @@ function safeSource(relative) {
 export function verifyContextManifest() {
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   if (manifest.schema !== 'nanoclaw-compose-context/v1') throw new Error('Unknown context manifest');
-  for (const kind of ['host', 'agent']) {
+  for (const kind of ['host', 'agent', 'broker']) {
     const expected = discovered(kind);
     const listed = manifest[kind];
     if (
@@ -107,7 +113,7 @@ function sha256(bytes) {
 }
 
 export function stageContext(kind, manifest = verifyContextManifest()) {
-  if (kind !== 'host' && kind !== 'agent') throw new Error('Unknown context');
+  if (!['host', 'agent', 'broker'].includes(kind)) throw new Error('Unknown context');
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-compose-'));
   const context = path.join(parent, kind);
   try {
@@ -132,7 +138,7 @@ export function cleanupContext(context) {
   const absolute = path.resolve(context);
   const parent = path.dirname(absolute);
   if (
-    !['host', 'agent'].includes(path.basename(absolute)) ||
+    !['host', 'agent', 'broker'].includes(path.basename(absolute)) ||
     path.dirname(parent) !== os.tmpdir() ||
     !path.basename(parent).startsWith('nanoclaw-compose-') ||
     fs.readFileSync(path.join(parent, '.owner'), 'utf8') !== marker
@@ -147,7 +153,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     const [command, argument] = process.argv.slice(2);
     if (command === '--cleanup' && argument) {
       cleanupContext(argument);
-    } else if ((command === '--stage' && ['host', 'agent'].includes(argument)) || command === '--check') {
+    } else if ((command === '--stage' && ['host', 'agent', 'broker'].includes(argument)) || command === '--check') {
       const manifest = verifyContextManifest();
       const audit = await auditSource();
       if (!audit.passed) throw new Error('Source privacy gate blocked');
@@ -155,7 +161,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
         process.stdout.write(stageContext(argument, manifest) + '\n');
       } else {
         process.stdout.write(
-          'compose contexts: pass (' + manifest.host.length + ' host, ' + manifest.agent.length + ' agent files)\n',
+          'compose contexts: pass (' +
+            manifest.host.length +
+            ' host, ' +
+            manifest.agent.length +
+            ' agent, ' +
+            manifest.broker.length +
+            ' broker files)\n',
         );
       }
     } else {
