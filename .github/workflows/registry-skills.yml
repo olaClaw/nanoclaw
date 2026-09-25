@@ -19,6 +19,11 @@ on:
 permissions:
   contents: read
 
+# This fork intentionally has no local channels/providers registry branches.
+# Test against the public upstream registries without copying them into the fork.
+env:
+  NANOCLAW_REGISTRY_REMOTE: upstream
+
 jobs:
   discover:
     runs-on: ubuntu-latest
@@ -31,6 +36,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.core_sha || github.sha }}
+      - run: git remote add upstream https://github.com/nanocoai/nanoclaw.git
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -60,15 +66,15 @@ jobs:
           if [ -n "$providers" ]; then
             case "$providers" in *[!0-9a-fA-F]*|'') exit 1;; esac
             test ${#providers} -eq 40
-            git fetch origin "$providers"
+            git fetch upstream "$providers"
             git cat-file -e "$providers^{commit}"
           else
-            git fetch origin providers
-            providers=$(git rev-parse origin/providers)
+            git fetch upstream providers
+            providers=$(git rev-parse upstream/providers)
           fi
-          git fetch origin channels
+          git fetch upstream channels
           echo "core=$core" >> "$GITHUB_OUTPUT"
-          echo "channels=$(git rev-parse origin/channels)" >> "$GITHUB_OUTPUT"
+          echo "channels=$(git rev-parse upstream/channels)" >> "$GITHUB_OUTPUT"
           echo "providers=$providers" >> "$GITHUB_OUTPUT"
 
   test:
@@ -84,6 +90,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.discover.outputs.core }}
+      - run: git remote add upstream https://github.com/nanocoai/nanoclaw.git
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -108,6 +115,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.discover.outputs.core }}
+      - run: git remote add upstream https://github.com/nanocoai/nanoclaw.git
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -131,6 +139,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.discover.outputs.core }}
+      - run: git remote add upstream https://github.com/nanocoai/nanoclaw.git
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -151,6 +160,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.discover.outputs.core }}
+      - run: git remote add upstream https://github.com/nanocoai/nanoclaw.git
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:

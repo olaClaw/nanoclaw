@@ -104,6 +104,16 @@ test('blocks private commit messages and personal commit email metadata', async 
   });
 });
 
+test('accepts the public GitHub committer address used for PR merge previews', async () => {
+  await fixture(async (root, base) => {
+    await fs.writeFile(path.join(root, 'draft.txt'), 'clean\n');
+    await git(root, 'add', '-A');
+    await git(root, '-c', 'user.name=GitHub', '-c', 'user.email=noreply@github.com', 'commit', '-qm', 'fixture');
+    const result = await auditSource({ root, base });
+    assert.equal(result.passed, true);
+  });
+});
+
 test('fails closed when the accepted baseline is unavailable', async () => {
   await fixture(async (root) => {
     await assert.rejects(auditSource({ root, base: '0'.repeat(40) }));

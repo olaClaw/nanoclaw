@@ -78,7 +78,12 @@ export function candidates(bytes) {
       addCandidate(found, 'private-ipv4', match[0]);
   }
   for (const match of source.matchAll(/\b[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/g)) {
-    if (!reservedEmailDomain.test(match[1]) && !match[1].endsWith('.noreply.github.com')) {
+    // GitHub uses this public service address as the committer of PR merge previews.
+    if (
+      match[0].toLowerCase() !== 'noreply@github.com' &&
+      !reservedEmailDomain.test(match[1]) &&
+      !match[1].endsWith('.noreply.github.com')
+    ) {
       addCandidate(found, 'personal-email', match[0].toLowerCase());
     }
   }
