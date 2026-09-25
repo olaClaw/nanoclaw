@@ -10,15 +10,18 @@ RUN pnpm exec tsc && pnpm prune --prod --ignore-scripts
 FROM node:22-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates docker.io \
     && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
+WORKDIR /srv/nanoclaw
 COPY --from=build /app/dist/ ./dist/
 COPY --from=build /app/node_modules/ ./node_modules/
 COPY package.json ./
 COPY container/CLAUDE.md ./container/CLAUDE.md
 COPY container/agent-runner/src/mcp-tools/*.instructions.md ./container/agent-runner/src/mcp-tools/
 COPY container/skills/ ./container/skills/
+COPY deploy/healthcheck.mjs ./deploy/healthcheck.mjs
 RUN mkdir -p data groups store templates && chown -R node:node data groups store templates
 ARG SOURCE_REVISION
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
+ENV NANOCLAW_SOURCE_REVISION="${SOURCE_REVISION}"
 USER node
+HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 CMD node deploy/healthcheck.mjs
 CMD ["node", "dist/index.js"]

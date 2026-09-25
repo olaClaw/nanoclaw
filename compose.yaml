@@ -1,0 +1,57 @@
+# Core host preview. The complete stack and its bootstrap are still in progress.
+# The profile prevents an accidental `docker compose up` from starting it alone.
+services:
+  nanoclaw:
+    profiles: [core-preview]
+    image: ${NANOCLAW_HOST_IMAGE:?Set NANOCLAW_HOST_IMAGE to a reviewed image}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    group_add:
+      - ${DOCKER_SOCKET_GID:?Set DOCKER_SOCKET_GID for the Docker socket}
+    environment:
+      HOME: /home/node
+      NANOCLAW_AGENT_ASSETS_IN_IMAGE: 'true'
+      NANOCLAW_INSTALL_ID: ${NANOCLAW_INSTALL_ID:?Set NANOCLAW_INSTALL_ID}
+      CONTAINER_IMAGE: ${NANOCLAW_AGENT_IMAGE:?Set NANOCLAW_AGENT_IMAGE from the same commit}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - type: bind
+        source: /srv/nanoclaw/data
+        target: /srv/nanoclaw/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/nanoclaw/groups
+        target: /srv/nanoclaw/groups
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/nanoclaw/store
+        target: /srv/nanoclaw/store
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/nanoclaw/config
+        target: /home/node/.config
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/nanoclaw/templates
+        target: /srv/nanoclaw/templates
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.env
+        target: /srv/nanoclaw/.env
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        bind:
+          create_host_path: false

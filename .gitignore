@@ -31,6 +31,7 @@ groups
 *.keys.json
 .env
 .env*
+!.env.example
 
 # Temp files
 .tmp-*

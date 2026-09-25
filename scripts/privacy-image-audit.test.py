@@ -24,10 +24,10 @@ def tar_bytes(files):
     return output.getvalue()
 
 
-def image_archive(destination, layers, revision=REVISION, env=None):
+def image_archive(destination, layers, revision=REVISION, env=None, healthcheck=None):
     layer_names = ["layer" + str(index) + "/layer.tar" for index in range(len(layers))]
     config = {
-        "config": {"Env": env or ["NODE_ENV=production"], "Labels": {"org.opencontainers.image.revision": revision}},
+        "config": {"Env": env or ["NODE_ENV=production"], "Labels": {"org.opencontainers.image.revision": revision}, "Healthcheck": healthcheck},
         "history": [{"created_by": "fixture"}],
     }
     manifest = [{"Config": "config.json", "Layers": layer_names, "RepoTags": ["fixture:local"]}]
@@ -75,6 +75,14 @@ class ImageAuditTests(unittest.TestCase):
             counts = AUDIT.check_archive(archive, 0, set(), REVISION)
             self.assertGreater(counts.get("secret-in-image-env", 0), 0)
 
+    def test_scans_healthcheck_metadata(self):
+        address = ".".join(["10", "52", "4", "3"])
+        with tempfile.TemporaryDirectory() as temp:
+            archive = Path(temp) / "image.tar"
+            image_archive(archive, [{"app/src/index.js": "clean"}], healthcheck={"Test": ["CMD", "ping", address]})
+            counts = AUDIT.check_archive(archive, 0, set(), REVISION)
+            self.assertGreater(counts.get("private-ipv4", 0), 0)
+
     def test_scans_javascript_with_nul_without_treating_it_as_binary(self):
         address = ".".join(["10", "52", "4", "3"])
         with tempfile.TemporaryDirectory() as temp:
@@ -83,6 +91,20 @@ class ImageAuditTests(unittest.TestCase):
             counts = AUDIT.check_archive(archive, 0, set(), REVISION)
             self.assertGreater(counts.get("private-ipv4", 0), 0)
             self.assertFalse(any(key.startswith("binary-or-large") for key in counts))
+
+    def test_scans_shared_host_root_in_every_layer(self):
+        address = ".".join(["10", "52", "4", "3"])
+        with tempfile.TemporaryDirectory() as temp:
+            archive = Path(temp) / "image.tar"
+            image_archive(archive, [
+                {"usr/share/base.txt": "inherited"},
+                {"srv/nanoclaw/data/runtime.json": "fixture", "srv/nanoclaw/dist/index.js": address},
+                {"srv/nanoclaw/data/.wh.runtime.json": "", "srv/nanoclaw/dist/index.js": "clean"},
+            ])
+            counts = AUDIT.check_archive(archive, 1, set(), REVISION)
+            self.assertGreater(counts.get("runtime-or-secret-path", 0), 0)
+            self.assertGreater(counts.get("private-ipv4", 0), 0)
+            self.assertNotIn(address, json.dumps(counts))
 
 
 if __name__ == "__main__":

@@ -28,6 +28,10 @@ jobs:
         run: |
           node scripts/compose-context.mjs --check
           node scripts/compose-context.test.mjs
+      - name: Validate inactive Compose preview with example values
+        run: docker compose --env-file .env.example --profile core-preview config --quiet
+      - name: Test host healthcheck
+        run: node --test deploy/healthcheck.test.mjs
       - name: Test redacted image-layer audit
         run: python3 scripts/privacy-image-audit.test.py
 
@@ -140,6 +144,7 @@ jobs:
           lock_sha="$(sha256sum "$base_context/agent-runner/bun.lock" | cut -d' ' -f1)"
           docker build --quiet --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
             -t nanoclaw-host:review "$host_context" >/dev/null
+          docker image inspect --format '{{json .Config.Healthcheck}}' nanoclaw-host:review | grep -Fq deploy/healthcheck.mjs
           python3 scripts/privacy-image-audit.py --image nanoclaw-host:review \
             --base-image node:22-slim --revision "$GITHUB_SHA"
           docker build --quiet --build-arg "AGENT_RUNNER_LOCK_SHA256=$lock_sha" \

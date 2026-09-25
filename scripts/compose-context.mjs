@@ -18,6 +18,7 @@ const fixed = {
     'tsconfig.json',
     'container/CLAUDE.md',
     'deploy/host.Dockerfile',
+    'deploy/healthcheck.mjs',
   ],
   agent: ['deploy/agent.Dockerfile'],
 };

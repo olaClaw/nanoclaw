@@ -92,15 +92,24 @@ def image_path(raw):
     return parts
 
 
+def application_parts(parts):
+    if parts[:1] == ("app",):
+        return parts[1:]
+    if parts[:2] == ("srv", "nanoclaw"):
+        return parts[2:]
+    return None
+
+
 def forbidden_app_path(parts):
-    if not parts or parts[0] != "app":
+    relative = application_parts(parts)
+    if relative is None or not relative:
         return False
-    lower = [part.lower() for part in parts]
+    lower = [part.lower() for part in relative]
     name = lower[-1]
     if name == ".env.example":
         return False
     return (
-        (any(part in {"data", "groups", "store", "backups", ".ssh"} for part in lower[1:]) and len(parts) > 2)
+        (any(part in {"data", "groups", "store", "backups", ".ssh"} for part in lower) and len(relative) > 1)
         or re.match(r"^\.env(?:\.|$)", name) is not None
         or name.endswith((".pem", ".key", ".p12", ".pfx"))
     )
@@ -130,6 +139,7 @@ def check_archive(archive, base_layers, accepted, expected_revision):
         metadata = json.dumps({
             "env": image_config.get("Env", []),
             "labels": labels,
+            "healthcheck": image_config.get("Healthcheck"),
             "history": [row.get("created_by", "") for row in config.get("history", [])],
         }).encode()
         check_content(metadata, accepted, counts, "metadata")
@@ -140,7 +150,7 @@ def check_archive(archive, base_layers, accepted, expected_revision):
                         parts = image_path(member.name)
                         if forbidden_app_path(parts) and not member.isdir():
                             counts["runtime-or-secret-path"] += 1
-                        if index < base_layers or parts[:1] != ("app",) or "node_modules" in parts:
+                        if index < base_layers or application_parts(parts) is None or "node_modules" in parts:
                             continue
                         if member.issym() or member.islnk():
                             counts["app-symlink"] += 1
