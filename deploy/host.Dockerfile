@@ -18,6 +18,7 @@ COPY container/CLAUDE.md ./container/CLAUDE.md
 COPY container/agent-runner/src/mcp-tools/*.instructions.md ./container/agent-runner/src/mcp-tools/
 COPY container/skills/ ./container/skills/
 COPY deploy/healthcheck.mjs ./deploy/healthcheck.mjs
+COPY deploy/onecli-egress.mjs ./deploy/onecli-egress.mjs
 RUN mkdir -p data groups store templates && chown -R node:node data groups store templates
 ARG SOURCE_REVISION
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"

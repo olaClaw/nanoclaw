@@ -17,6 +17,7 @@
     "container/skills/welcome/SKILL.md",
     "deploy/healthcheck.mjs",
     "deploy/host.Dockerfile",
+    "deploy/onecli-egress.mjs",
     "package.json",
     "pnpm-lock.yaml",
     "pnpm-workspace.yaml",

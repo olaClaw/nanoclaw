@@ -29,9 +29,14 @@ jobs:
           node scripts/compose-context.mjs --check
           node scripts/compose-context.test.mjs
       - name: Validate inactive Compose preview with example values
-        run: docker compose --env-file .env.example --profile core-preview config --quiet
+        shell: bash
+        run: |
+          set -euo pipefail
+          example_secret="$(mktemp)"
+          trap 'rm -f "$example_secret"' EXIT
+          ONECLI_DB_PASSWORD_FILE="$example_secret" docker compose --env-file .env.example --profile core-preview config --quiet
       - name: Test host healthcheck
-        run: node --test deploy/healthcheck.test.mjs
+        run: node --test deploy/healthcheck.test.mjs deploy/onecli-egress.test.mjs
       - name: Test redacted image-layer audit
         run: python3 scripts/privacy-image-audit.test.py
 

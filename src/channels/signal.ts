@@ -545,6 +545,7 @@ export function createSignalAdapter(config: {
   tcpPort: number;
   manageDaemon: boolean;
   signalDataDir: string;
+  attachmentDir?: string;
 }): ChannelAdapter {
   let daemon: DaemonHandle | null = null;
   let tcp: SignalTcpClient | null = null;
@@ -784,14 +785,17 @@ export function createSignalAdapter(config: {
     if (files.length === 0) return;
 
     const tempPaths: string[] = [];
-    for (const file of files) {
-      const safeName = file.filename.replace(/[/\\\0]/g, '_');
-      const tempPath = join(tmpdir(), `signal-out-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeName}`);
-      writeFileSync(tempPath, file.data);
-      tempPaths.push(tempPath);
-    }
-
     try {
+      for (const file of files) {
+        const safeName = file.filename.replace(/[/\\\0]/g, '_');
+        const tempPath = join(
+          config.attachmentDir || tmpdir(),
+          `signal-out-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeName}`,
+        );
+        writeFileSync(tempPath, file.data, { mode: 0o600, flag: 'wx' });
+        tempPaths.push(tempPath);
+      }
+
       const params: Record<string, unknown> = { attachments: tempPaths };
       if (config.account) params.account = config.account;
       if (platformId.startsWith('group:')) {
@@ -983,6 +987,7 @@ registerChannelAdapter('signal', {
       'SIGNAL_CLI_PATH',
       'SIGNAL_MANAGE_DAEMON',
       'SIGNAL_DATA_DIR',
+      'SIGNAL_ATTACHMENT_DIR',
     ]);
 
     const account = process.env.SIGNAL_ACCOUNT || envVars.SIGNAL_ACCOUNT || '';
@@ -998,6 +1003,7 @@ registerChannelAdapter('signal', {
 
     const signalDataDir =
       process.env.SIGNAL_DATA_DIR || envVars.SIGNAL_DATA_DIR || join(homedir(), '.local', 'share', 'signal-cli');
+    const attachmentDir = process.env.SIGNAL_ATTACHMENT_DIR || envVars.SIGNAL_ATTACHMENT_DIR || tmpdir();
 
     // Only check for `signal-cli` on PATH when the operator left cliPath at
     // the default AND asked us to manage the daemon. A custom absolute path
@@ -1018,6 +1024,7 @@ registerChannelAdapter('signal', {
       tcpPort,
       manageDaemon,
       signalDataDir,
+      attachmentDir,
     });
   },
   defaults: SIGNAL_DEFAULTS,

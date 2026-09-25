@@ -1,9 +1,14 @@
-# Core host preview. The complete stack and its bootstrap are still in progress.
-# The profile prevents an accidental `docker compose up` from starting it alone.
+# Gateway and Signal preview. Brokers and bootstrap are still in progress.
+# The profile prevents an accidental `docker compose up` from starting it.
 services:
   nanoclaw:
     profiles: [core-preview]
     image: ${NANOCLAW_HOST_IMAGE:?Set NANOCLAW_HOST_IMAGE to a reviewed image}
+    depends_on:
+      onecli-egress:
+        condition: service_healthy
+      signal-cli:
+        condition: service_started
     init: true
     restart: unless-stopped
     read_only: true
@@ -16,6 +21,16 @@ services:
       NANOCLAW_AGENT_ASSETS_IN_IMAGE: 'true'
       NANOCLAW_INSTALL_ID: ${NANOCLAW_INSTALL_ID:?Set NANOCLAW_INSTALL_ID}
       CONTAINER_IMAGE: ${NANOCLAW_AGENT_IMAGE:?Set NANOCLAW_AGENT_IMAGE from the same commit}
+      NANOCLAW_GATEWAY_PROVIDER: onecli
+      NANOCLAW_EGRESS_LOCKDOWN: 'true'
+      NANOCLAW_EGRESS_NETWORK: nanoclaw-egress
+      ONECLI_GATEWAY_CONTAINER: onecli-egress
+      ONECLI_URL: http://onecli:10255
+      SIGNAL_MANAGE_DAEMON: 'false'
+      SIGNAL_TCP_HOST: signal-cli
+      SIGNAL_TCP_PORT: '7583'
+      SIGNAL_DATA_DIR: /srv/nanoclaw/signal
+      SIGNAL_ATTACHMENT_DIR: /srv/nanoclaw/signal-outbox
     extra_hosts:
       - host.docker.internal:host-gateway
     volumes:
@@ -45,6 +60,17 @@ services:
         bind:
           create_host_path: false
       - type: bind
+        source: /srv/nanoclaw/signal/attachments
+        target: /srv/nanoclaw/signal/attachments
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/nanoclaw/signal-outbox
+        target: /srv/nanoclaw/signal-outbox
+        bind:
+          create_host_path: false
+      - type: bind
         source: ./.env
         target: /srv/nanoclaw/.env
         read_only: true
@@ -55,3 +81,114 @@ services:
         target: /var/run/docker.sock
         bind:
           create_host_path: false
+    networks: [gateway, channels]
+
+  signal-cli:
+    profiles: [core-preview]
+    image: ${SIGNAL_IMAGE:?Set SIGNAL_IMAGE to a reviewed signal-cli image}
+    # The official image already supplies the executable and --config path.
+    command: [daemon, --tcp, '0.0.0.0:7583']
+    user: '1000:1000'
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:mode=1777
+    volumes:
+      - type: bind
+        source: /srv/nanoclaw/signal
+        target: /var/lib/signal-cli
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/nanoclaw/signal-outbox
+        target: /srv/nanoclaw/signal-outbox
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [channels]
+
+  postgres:
+    profiles: [core-preview]
+    image: ${POSTGRES_IMAGE:?Set POSTGRES_IMAGE to the reviewed PostgreSQL image}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: onecli
+      POSTGRES_DB: onecli
+      POSTGRES_PASSWORD_FILE: /run/secrets/onecli_db_password
+    secrets: [onecli_db_password]
+    volumes:
+      - onecli-pgdata:/var/lib/postgresql
+    healthcheck:
+      test: [CMD, pg_isready, -h, 127.0.0.1, -U, onecli, -d, onecli]
+      interval: 5s
+      timeout: 3s
+      start_period: 15s
+      retries: 10
+    networks: [db]
+
+  onecli:
+    profiles: [core-preview]
+    image: ${ONECLI_IMAGE:?Set ONECLI_IMAGE to a reviewed gateway image}
+    container_name: onecli
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # OneCLI 1.41.0 needs DATABASE_URL, not a _FILE setting. Construct it
+    # inside the container from a hex-only password file to keep the value out
+    # of Compose interpolation, image metadata and configuration output.
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        password=$$(cat /run/secrets/onecli_db_password)
+        [ "$${#password}" -eq 64 ] || exit 1
+        case "$$password" in *[!0-9a-fA-F]*) exit 1;; esac
+        export DATABASE_URL="postgresql://onecli:$$password@postgres:5432/onecli"
+        exec /app/entrypoint.sh
+    environment:
+      APP_URL: http://127.0.0.1:10254
+      GATEWAY_API_URL: http://127.0.0.1:10255
+    secrets: [onecli_db_password]
+    volumes:
+      - onecli-data:/app/data
+    ports:
+      - '127.0.0.1:10254:10254'
+    networks: [gateway, db]
+
+  onecli-egress:
+    profiles: [core-preview]
+    image: ${NANOCLAW_HOST_IMAGE:?Set NANOCLAW_HOST_IMAGE to a reviewed image}
+    container_name: onecli-egress
+    command: [node, deploy/onecli-egress.mjs]
+    restart: unless-stopped
+    read_only: true
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      onecli:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, deploy/onecli-egress.mjs, --health]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks: [gateway]
+
+secrets:
+  onecli_db_password:
+    file: ${ONECLI_DB_PASSWORD_FILE:?Set ONECLI_DB_PASSWORD_FILE outside Git}
+
+volumes:
+  onecli-pgdata:
+  onecli-data:
+
+networks:
+  gateway:
+    driver: bridge
+  db:
+    internal: true
+  channels:
+    driver: bridge

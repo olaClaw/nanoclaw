@@ -19,6 +19,7 @@ const fixed = {
     'container/CLAUDE.md',
     'deploy/host.Dockerfile',
     'deploy/healthcheck.mjs',
+    'deploy/onecli-egress.mjs',
   ],
   agent: ['deploy/agent.Dockerfile'],
 };
