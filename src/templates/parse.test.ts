@@ -212,7 +212,12 @@ describe('parseTemplate', () => {
       [
         'host-gateway url',
         { type: 'streamable-http', url: 'https://host.docker.internal/mcp' },
-        /reaches the container host/,
+        /private network or the container host/,
+      ],
+      [
+        'private IPv4 url',
+        { type: 'streamable-http', url: `https://${[172, 17, 0, 1].join('.')}/mcp` },
+        /private network or the container host/,
       ],
       ['cwd escaping the root', { type: 'stdio', command: 'server', cwd: './../evil' }, /cwd escapes the plugin root/],
       ['free-form cwd', { type: 'stdio', command: 'server', cwd: '/etc' }, /cwd must be/],
@@ -233,7 +238,7 @@ describe('parseTemplate', () => {
       [
         'plain-http host-gateway url',
         { type: 'streamable-http', url: 'http://host.docker.internal/mcp' },
-        /reaches the container host/,
+        /private network or the container host/,
       ],
     ])('skips a server with %s and keeps the rest', (_case, server, message) => {
       writeManifest();

@@ -9,6 +9,28 @@ on:
     branches: [main]
 
 jobs:
+  privacy-source:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Test privacy source gate
+        run: node --test scripts/privacy-source-gate.test.mjs
+      - name: Block newly introduced private source data
+        run: node scripts/privacy-source-gate.mjs
+      - name: Verify minimal Compose build contexts
+        run: |
+          node scripts/compose-context.mjs --check
+          node scripts/compose-context.test.mjs
+      - name: Test redacted image-layer audit
+        run: python3 scripts/privacy-image-audit.test.py
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -21,6 +43,10 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
+      - name: Agent build-context privacy preflight
+        run: |
+          node scripts/privacy-agent-context.mjs
+          node scripts/privacy-agent-context.test.mjs
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
@@ -37,6 +63,9 @@ jobs:
 
       - name: Typecheck container
         run: pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
+
+      - name: Typecheck reviewed Compose source contexts
+        run: node scripts/compose-context-compile.mjs
 
       - name: Host tests
         run: pnpm exec vitest run
@@ -74,16 +103,65 @@ jobs:
           test -z "$(gofmt -l .)"
           git -C "$source_dir" diff --exit-code
 
+  image-audit:
+    needs: [privacy-source, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build and audit host and agent images without publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_context="$(node scripts/privacy-agent-context.mjs --stage container)"
+          host_context=""
+          agent_context=""
+          cleanup() {
+            status=$?
+            trap - EXIT
+            if [ -n "$agent_context" ]; then node scripts/compose-context.mjs --cleanup "$agent_context" || status=1; fi
+            if [ -n "$host_context" ]; then node scripts/compose-context.mjs --cleanup "$host_context" || status=1; fi
+            node scripts/privacy-agent-context.mjs --cleanup "$base_context" || status=1
+            exit "$status"
+          }
+          trap cleanup EXIT
+          host_context="$(node scripts/compose-context.mjs --stage host)"
+          agent_context="$(node scripts/compose-context.mjs --stage agent)"
+          lock_sha="$(sha256sum "$base_context/agent-runner/bun.lock" | cut -d' ' -f1)"
+          docker build --quiet --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
+            -t nanoclaw-host:review "$host_context" >/dev/null
+          python3 scripts/privacy-image-audit.py --image nanoclaw-host:review \
+            --base-image node:22-slim --revision "$GITHUB_SHA"
+          docker build --quiet --build-arg "AGENT_RUNNER_LOCK_SHA256=$lock_sha" \
+            -t nanoclaw-agent-base:review "$base_context" >/dev/null
+          docker build --quiet --build-arg "BASE_IMAGE=nanoclaw-agent-base:review" \
+            --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
+            -t nanoclaw-agent:review "$agent_context" >/dev/null
+          python3 scripts/privacy-image-audit.py --image nanoclaw-agent:review \
+            --base-image nanoclaw-agent-base:review --revision "$GITHUB_SHA"
+
   # Repository rules require exact `ci`; always run it so matrix failures remain blocking.
   ci:
     if: always()
-    needs: [test, iron-front]
+    needs: [test, iron-front, privacy-source, image-audit]
     permissions: {}
     runs-on: ubuntu-latest
     steps:
       - run: |
           test "${{ needs.test.result }}" = success
           test "${{ needs.iron-front.result }}" = success
+          test "${{ needs.privacy-source.result }}" = success
+          test "${{ needs.image-audit.result }}" = success
 
   # The single check the main ruleset will require, in every repo under the same
   # name. It needs `ci` as well as `test` so the older required context and the
@@ -92,7 +170,7 @@ jobs:
   gate:
     name: gate
     if: always()
-    needs: [test, iron-front, ci]
+    needs: [test, iron-front, privacy-source, image-audit, ci]
     permissions: {}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -102,3 +180,5 @@ jobs:
           test "${{ needs.test.result }}" = success
           test "${{ needs.ci.result }}" = success
           test "${{ needs.iron-front.result }}" = success
+          test "${{ needs.privacy-source.result }}" = success
+          test "${{ needs.image-audit.result }}" = success

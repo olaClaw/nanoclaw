@@ -18,7 +18,7 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 // Composing the group's instructions needs the central DB and is not what is
 // under test; every path it would write is created below instead.
@@ -68,6 +68,8 @@ afterAll(() => {
   fs.rmSync(path.join(DATA_DIR, 'v2-sessions', GROUP_ID), { recursive: true, force: true });
 });
 
+afterEach(() => vi.unstubAllEnvs());
+
 async function composedMounts() {
   return buildMounts(agentGroup, session, containerConfig, 'claude', {});
 }
@@ -104,6 +106,21 @@ describe('buildMounts against the policy the drivers enforce', () => {
         '/app/src',
       ]),
     );
+  });
+
+  it('uses release assets from a self-contained image without mounting checkout code', async () => {
+    vi.stubEnv('NANOCLAW_AGENT_ASSETS_IN_IMAGE', 'true');
+    const mounts = await composedMounts();
+    const paths = mounts.map((mount) => mount.containerPath);
+    expect(paths).not.toContain('/app/src');
+    expect(paths).not.toContain('/app/skills');
+    expect(paths).toEqual(expect.arrayContaining(['/workspace', '/workspace/agent', '/workspace/agent/plugins']));
+    expect(() => validateSpec(specFrom(mounts), mountPolicy())).not.toThrow();
+  });
+
+  it('rejects an ambiguous release-assets setting before composing mounts', async () => {
+    vi.stubEnv('NANOCLAW_AGENT_ASSETS_IN_IMAGE', 'yes');
+    await expect(composedMounts()).rejects.toThrow(/NANOCLAW_AGENT_ASSETS_IN_IMAGE must be true or false/);
   });
 
   it('classes every mount for a root it actually lives under', async () => {

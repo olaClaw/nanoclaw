@@ -106,6 +106,22 @@ if [ -z "$PULL" ]; then
     fi
 fi
 
+if [ "$PULL" != "true" ]; then
+    # Copy exactly the reviewed build inputs before touching install settings.
+    # Docker receives this generated context, never the working directory.
+    BUILD_CONTEXT="$(node "$PROJECT_ROOT/scripts/privacy-agent-context.mjs" --stage "$SCRIPT_DIR")"
+    OVERLAY_DOCKERFILE=""
+    cleanup_build_context() {
+        local status=$?
+        if [ -n "$OVERLAY_DOCKERFILE" ]; then
+            rm -f -- "$OVERLAY_DOCKERFILE" || status=1
+        fi
+        node "$PROJECT_ROOT/scripts/privacy-agent-context.mjs" --cleanup "$BUILD_CONTEXT" || status=1
+        return "$status"
+    }
+    trap cleanup_build_context EXIT
+fi
+
 # An explicit `build` on a pinned install is a decision, not a one-off. Record
 # it, because the line above promises this "leaves the pulled-image path" and
 # until now it did not: .env still said hardened, so the next bare build refused
@@ -200,7 +216,6 @@ elif [ "$OVERLAY" = "true" ]; then
     # otherwise would be as wrong as the inverse. What changes is that some
     # tools on top were not part of that, which is what the new label records.
     OVERLAY_DOCKERFILE="$(mktemp)"
-    trap 'rm -f "$OVERLAY_DOCKERFILE"' EXIT
     {
         echo "FROM ${IMAGE_NAME}:${TAG}"
         echo "USER root"
@@ -211,12 +226,12 @@ elif [ "$OVERLAY" = "true" ]; then
         echo "LABEL dev.nanoclaw.unhardened-additions=\"cli-tools.json\""
     } > "$OVERLAY_DOCKERFILE"
 
-    build_image -f "$OVERLAY_DOCKERFILE" -t "${IMAGE_NAME}:${TAG}" .
+    build_image -f "$OVERLAY_DOCKERFILE" -t "${IMAGE_NAME}:${TAG}" "$BUILD_CONTEXT"
 else
     echo "Building NanoClaw agent container image..."
     echo "Image: ${IMAGE_NAME}:${TAG}"
 
-    build_image "${BUILD_ARGS[@]}" -t "${IMAGE_NAME}:${TAG}" .
+    build_image "${BUILD_ARGS[@]}" -t "${IMAGE_NAME}:${TAG}" "$BUILD_CONTEXT"
 fi
 
 echo ""

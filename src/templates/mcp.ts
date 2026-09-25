@@ -9,6 +9,7 @@
  * real key never lands in a registry install.
  */
 import fs from 'fs';
+import { isIP } from 'node:net';
 import path from 'path';
 
 import { parseMcpServerConfig, validateMcpServerName, type McpServerConfig } from '../container-config.js';
@@ -24,7 +25,13 @@ const HTTP_FIELDS = new Set(['type', 'url', 'headers']);
 // Hostnames that reach the Docker host from inside a container. Hygiene, not
 // a boundary — the agent's own tools can reach the same endpoints; the real
 // boundary is the container network policy.
-const HOST_GATEWAY_HOSTS = new Set(['host.docker.internal', 'gateway.docker.internal', '172.17.0.1']);
+const HOST_GATEWAY_HOSTS = new Set(['host.docker.internal', 'gateway.docker.internal']);
+
+function isPrivateIpv4Host(hostname: string): boolean {
+  if (isIP(hostname) !== 4) return false;
+  const [first, second] = hostname.split('.').map(Number);
+  return first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168);
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -132,7 +139,9 @@ function readServerEntry(name: string, entry: unknown, report: string[]): McpSer
 
   if (server.type === 'http') {
     const hostname = new URL(server.url).hostname;
-    if (HOST_GATEWAY_HOSTS.has(hostname)) return `URL host "${hostname}" reaches the container host; not allowed`;
+    if (HOST_GATEWAY_HOSTS.has(hostname) || isPrivateIpv4Host(hostname)) {
+      return `URL host "${hostname}" reaches a private network or the container host; not allowed`;
+    }
     lintSecrets(name, 'header', server.headers ?? {}, report);
     return server;
   }
