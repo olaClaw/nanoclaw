@@ -12,19 +12,27 @@ any push and after each push: existing public packages or an unreadable
 visibility result block the job, as does a newly created package that is not
 private.
 
-The job is disabled by default. Before enabling it, the organization owner
-must check **olaClaw → Settings → Packages → Package Creation** in GitHub's
-browser interface and restrict creation to private packages. GitHub says new
-GHCR packages start private and a linked public repository does not change
-their visibility, but a public package cannot be made private again. Then set
-the repository Actions variable `OLAC_GHCR_PRIVATE_READY` to the literal value
-`true` under **nanoclaw → Settings → Secrets and variables → Actions →
-Variables**. No personal access token is needed in CI: the job uses its
-short-lived `GITHUB_TOKEN` with `packages: write` after all required jobs have
-succeeded. The source label links each package to this repository for workflow
-access; it does not make the package public.
+The job runs only when an operator manually dispatches **CI** on `main` with
+the **Publish private Compose images** input checked. A normal push, a pull
+request, or a manual run with the input unchecked cannot publish. Before the
+first release, the organization owner must check **olaClaw → Settings →
+Packages → Package Creation** in GitHub's browser interface and restrict
+creation to private packages. GitHub says new GHCR packages start private and
+a linked public repository does not change their visibility, but a public
+package cannot be made private again. No repository variable or personal
+access token is needed: the job uses its short-lived `GITHUB_TOKEN` with
+`packages: write` after all required jobs have succeeded. The source label
+links each package to this repository for workflow access; it does not make
+the package public.
 
-After the first successful main-branch CI run, inspect **olaClaw → Packages**
+To start a release in the browser, open **Actions → CI → Run workflow**, select
+`main`, check **Publish private Compose images**, and run it. From an authenticated
+GitHub CLI, the equivalent is
+`gh workflow run ci.yml --repo olaClaw/nanoclaw --ref main -f publish_compose=true`.
+Check that the run uses the intended `main` commit before using its artifact.
+The manual input is per run; no later push is armed by this release.
+
+After the successful manual CI run, inspect **olaClaw → Packages**
 and verify that all three packages say **Private**. Download the
 `compose-release-<commit>` artifact from that run. Its `revision` and `tree`
 must match the checked-out release commit, and its three fork references must
