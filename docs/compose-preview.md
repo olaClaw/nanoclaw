@@ -30,6 +30,8 @@ six local images and requires matching commit/tree labels on the three fork
 images before startup; before creating an agent session, its Docker driver
 also checks the agent revision label. Local images built from uncommitted
 changes are only test artifacts, never release images.
+The private GHCR publication procedure and its browser-side activation gate
+are documented in [compose-ghcr-release.md](compose-ghcr-release.md).
 
 For a **fresh** data directory, after pulling all six images and preparing
 the bind sources, run `docker compose --env-file .env --profile core-preview run
