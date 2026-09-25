@@ -18,6 +18,7 @@ const envConfig = readEnvFile([
   'CONTAINER_PIDS_LIMIT',
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
+  'NANOCLAW_AGENT_ASSETS_IN_IMAGE',
   'WEBHOOK_PORT',
 ]);
 
@@ -83,6 +84,17 @@ export const TEMPLATES_DIR = process.env.NANOCLAW_TEMPLATES_DIR
 // `nanoclaw-agent:latest` and clobber each other on rebuild.
 export const CONTAINER_IMAGE_BASE = process.env.CONTAINER_IMAGE_BASE || getContainerImageBase(PROJECT_ROOT);
 export const CONTAINER_IMAGE = process.env.CONTAINER_IMAGE || getDefaultContainerImage(PROJECT_ROOT);
+
+// The legacy image receives /app/src and /app/skills from read-only host bind
+// mounts. A future self-contained image can provide both paths itself. This
+// switch is deliberately opt-in: an old image must never silently lose code.
+export function agentAssetsInImage(): boolean {
+  const raw = process.env.NANOCLAW_AGENT_ASSETS_IN_IMAGE ?? envConfig.NANOCLAW_AGENT_ASSETS_IN_IMAGE ?? 'false';
+  if (raw !== 'true' && raw !== 'false') {
+    throw new Error('NANOCLAW_AGENT_ASSETS_IN_IMAGE must be true or false');
+  }
+  return raw === 'true';
+}
 // Install slug — the session key's install component, stamped onto every
 // runtime object via the canonical `nanoclaw-install` label so adoption and
 // reaping only ever see this install's sessions, not a peer's.

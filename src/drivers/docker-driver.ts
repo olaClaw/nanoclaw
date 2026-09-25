@@ -50,6 +50,8 @@ import {
 
 export interface DockerDriverOptions extends MountPolicy {
   cli?: Cli;
+  /** Image revision baked into the Compose host; unset for checkout-based installs. */
+  expectedImageRevision?: string;
   /** Docker network the session's containers attach to, resolved by the overlay. */
   networkArgsFor?: (spec: SessionSpec) => string[];
   reconcileNetworkAccess?: (access: NetworkAccessIntent) => void;
@@ -123,12 +125,36 @@ export class DockerSessionDriver implements SessionDriver {
     const privateNetwork = extra.length > 0 ? sessionNetworkName(spec) : undefined;
     const auxiliaryNames = extra.map((container) => auxiliaryContainerName(spec, container.role));
 
-    this.#remember(spec.key);
-
     // Idempotency on key: an existing live container for this key is the session.
     if (this.#existingSession(name, spec.key)) {
       return new DockerHandle(spec.key, name, this.#cli, null, auxiliaryNames, privateNetwork, this.#emit);
     }
+
+    // A Compose host must never start an agent built from a different source
+    // revision. Derived per-group images inherit this label from the base image.
+    const expectedRevision = this.opts.expectedImageRevision ?? process.env.NANOCLAW_SOURCE_REVISION;
+    if (expectedRevision) {
+      if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(expectedRevision)) {
+        throw specInvalid('Host image revision is invalid');
+      }
+      let actualRevision: string;
+      try {
+        actualRevision = this.#cli
+          .run([
+            'image',
+            'inspect',
+            '--format',
+            '{{ index .Config.Labels "org.opencontainers.image.revision" }}',
+            agent.image,
+          ])
+          .trim();
+      } catch {
+        throw specInvalid('Agent image revision could not be verified');
+      }
+      if (actualRevision !== expectedRevision) throw specInvalid('Agent image revision differs from host');
+    }
+
+    this.#remember(spec.key);
 
     // Composition existsSync-gates mount sources; re-check here so a
     // realization cannot silently invent one (Docker mounts a missing source
@@ -687,7 +713,7 @@ export function dockerEventToSessionEvent(doc: unknown, installSlug: string): Se
 export function agentContainerName(spec: Pick<SessionSpec, 'key'>): string {
   const raw = `${spec.key.installSlug}-${spec.key.sessionId}`.replaceAll(/[^a-zA-Z0-9_.-]/g, '-');
   if (raw.length <= 48) return `ncl-${raw}`;
-  const hash = createHash('sha256').update(`${spec.key.installSlug} ${spec.key.sessionId}`).digest('hex').slice(0, 8);
+  const hash = createHash('sha256').update(`${spec.key.installSlug}\0${spec.key.sessionId}`).digest('hex').slice(0, 8);
   return `ncl-${raw.slice(0, 39)}-${hash}`;
 }
 

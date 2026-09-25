@@ -9,6 +9,43 @@ on:
     branches: [main]
 
 jobs:
+  privacy-source:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Test privacy source gate
+        run: node --test scripts/privacy-source-gate.test.mjs
+      - name: Block newly introduced private source data
+        run: node scripts/privacy-source-gate.mjs
+      - name: Verify minimal Compose build contexts
+        run: |
+          node scripts/compose-context.mjs --check
+          node scripts/compose-context.test.mjs
+      - name: Validate inactive Compose preview with example values
+        shell: bash
+        run: |
+          set -euo pipefail
+          example_secret="$(mktemp)"
+          trap 'rm -f "$example_secret"' EXIT
+          ONECLI_DB_PASSWORD_FILE="$example_secret" docker compose --env-file .env.example --profile core-preview config --quiet
+      - name: Test host healthcheck
+        run: node --test deploy/healthcheck.test.mjs deploy/onecli-egress.test.mjs
+      - name: Test Compose release and bootstrap gates
+        run: node deploy/release-manifest.test.mjs
+      - name: Test read-only brokers
+        run: |
+          python3 .claude/skills/add-infomaniak-mail-readonly/test_infomaniak_mail_broker.py
+          python3 deploy/nextcloud-calendar-broker.test.py
+      - name: Test redacted image-layer audit
+        run: python3 scripts/privacy-image-audit.test.py
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -21,6 +58,10 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
+      - name: Agent build-context privacy preflight
+        run: |
+          node scripts/privacy-agent-context.mjs
+          node scripts/privacy-agent-context.test.mjs
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
@@ -37,6 +78,9 @@ jobs:
 
       - name: Typecheck container
         run: pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
+
+      - name: Typecheck reviewed Compose source contexts
+        run: node scripts/compose-context-compile.mjs
 
       - name: Host tests
         run: pnpm exec vitest run
@@ -74,16 +118,78 @@ jobs:
           test -z "$(gofmt -l .)"
           git -C "$source_dir" diff --exit-code
 
+  image-audit:
+    needs: [privacy-source, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build and audit host and agent images without publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_context="$(node scripts/privacy-agent-context.mjs --stage container)"
+          host_context=""
+          agent_context=""
+          broker_context=""
+          cleanup() {
+            status=$?
+            trap - EXIT
+            if [ -n "$agent_context" ]; then node scripts/compose-context.mjs --cleanup "$agent_context" || status=1; fi
+            if [ -n "$host_context" ]; then node scripts/compose-context.mjs --cleanup "$host_context" || status=1; fi
+            if [ -n "$broker_context" ]; then node scripts/compose-context.mjs --cleanup "$broker_context" || status=1; fi
+            node scripts/privacy-agent-context.mjs --cleanup "$base_context" || status=1
+            exit "$status"
+          }
+          trap cleanup EXIT
+          host_context="$(node scripts/compose-context.mjs --stage host)"
+          agent_context="$(node scripts/compose-context.mjs --stage agent)"
+          broker_context="$(node scripts/compose-context.mjs --stage broker)"
+          lock_sha="$(sha256sum "$base_context/agent-runner/bun.lock" | cut -d' ' -f1)"
+          source_tree="$(git rev-parse 'HEAD^{tree}')"
+          # BuildKit may fetch bases without tagging them in the Docker image store.
+          # The audit needs the exact local base images to compare layer ancestry.
+          docker pull node:22-slim >/dev/null
+          docker pull python:3.12-slim >/dev/null
+          docker build --quiet --build-arg "SOURCE_REVISION=$GITHUB_SHA" --build-arg "SOURCE_TREE=$source_tree" \
+            -t nanoclaw-host:review "$host_context" >/dev/null
+          docker image inspect --format '{{json .Config.Healthcheck}}' nanoclaw-host:review | grep -Fq deploy/healthcheck.mjs
+          python3 scripts/privacy-image-audit.py --image nanoclaw-host:review \
+            --base-image node:22-slim --revision "$GITHUB_SHA" --tree "$source_tree"
+          docker build --quiet --build-arg "AGENT_RUNNER_LOCK_SHA256=$lock_sha" \
+            -t nanoclaw-agent-base:review "$base_context" >/dev/null
+          docker build --quiet --build-arg "BASE_IMAGE=nanoclaw-agent-base:review" \
+            --build-arg "SOURCE_REVISION=$GITHUB_SHA" --build-arg "SOURCE_TREE=$source_tree" \
+            -t nanoclaw-agent:review "$agent_context" >/dev/null
+          python3 scripts/privacy-image-audit.py --image nanoclaw-agent:review \
+            --base-image nanoclaw-agent-base:review --revision "$GITHUB_SHA" --tree "$source_tree"
+          docker build --quiet --build-arg "SOURCE_REVISION=$GITHUB_SHA" --build-arg "SOURCE_TREE=$source_tree" \
+            -t nanoclaw-brokers:review "$broker_context" >/dev/null
+          python3 scripts/privacy-image-audit.py --image nanoclaw-brokers:review \
+            --base-image python:3.12-slim --revision "$GITHUB_SHA" --tree "$source_tree"
+
   # Repository rules require exact `ci`; always run it so matrix failures remain blocking.
   ci:
     if: always()
-    needs: [test, iron-front]
+    needs: [test, iron-front, privacy-source, image-audit]
     permissions: {}
     runs-on: ubuntu-latest
     steps:
       - run: |
           test "${{ needs.test.result }}" = success
           test "${{ needs.iron-front.result }}" = success
+          test "${{ needs.privacy-source.result }}" = success
+          test "${{ needs.image-audit.result }}" = success
 
   # The single check the main ruleset will require, in every repo under the same
   # name. It needs `ci` as well as `test` so the older required context and the
@@ -92,7 +198,7 @@ jobs:
   gate:
     name: gate
     if: always()
-    needs: [test, iron-front, ci]
+    needs: [test, iron-front, privacy-source, image-audit, ci]
     permissions: {}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -102,3 +208,135 @@ jobs:
           test "${{ needs.test.result }}" = success
           test "${{ needs.ci.result }}" = success
           test "${{ needs.iron-front.result }}" = success
+          test "${{ needs.privacy-source.result }}" = success
+          test "${{ needs.image-audit.result }}" = success
+
+  # Disabled until the organization owner confirms private GHCR package creation.
+  # The release is built and audited again in this job; no CI image crosses jobs.
+  publish-compose:
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.repository == 'olaClaw/nanoclaw' &&
+      vars.OLAC_GHCR_PRIVATE_READY == 'true'
+    needs: [gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: compose-ghcr-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Recheck source and build contexts
+        run: |
+          node scripts/privacy-source-gate.mjs
+          node scripts/compose-context.mjs --check
+          node scripts/privacy-agent-context.mjs
+      - name: Build and audit all three images before authentication or push
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_context="$(node scripts/privacy-agent-context.mjs --stage container)"
+          host_context=""
+          agent_context=""
+          broker_context=""
+          cleanup() {
+            status=$?
+            trap - EXIT
+            if [ -n "$agent_context" ]; then node scripts/compose-context.mjs --cleanup "$agent_context" || status=1; fi
+            if [ -n "$host_context" ]; then node scripts/compose-context.mjs --cleanup "$host_context" || status=1; fi
+            if [ -n "$broker_context" ]; then node scripts/compose-context.mjs --cleanup "$broker_context" || status=1; fi
+            node scripts/privacy-agent-context.mjs --cleanup "$base_context" || status=1
+            exit "$status"
+          }
+          trap cleanup EXIT
+          host_context="$(node scripts/compose-context.mjs --stage host)"
+          agent_context="$(node scripts/compose-context.mjs --stage agent)"
+          broker_context="$(node scripts/compose-context.mjs --stage broker)"
+          lock_sha="$(sha256sum "$base_context/agent-runner/bun.lock" | cut -d' ' -f1)"
+          source_tree="$(git rev-parse 'HEAD^{tree}')"
+          source_label="org.opencontainers.image.source=https://github.com/olaClaw/nanoclaw"
+          docker pull node:22-slim >/dev/null
+          docker pull python:3.12-slim >/dev/null
+          docker build --quiet --label "$source_label" --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
+            --build-arg "SOURCE_TREE=$source_tree" -t nanoclaw-host:publish "$host_context" >/dev/null
+          docker image inspect --format '{{json .Config.Healthcheck}}' nanoclaw-host:publish | grep -Fq deploy/healthcheck.mjs
+          python3 scripts/privacy-image-audit.py --image nanoclaw-host:publish \
+            --base-image node:22-slim --revision "$GITHUB_SHA" --tree "$source_tree"
+          docker build --quiet --build-arg "AGENT_RUNNER_LOCK_SHA256=$lock_sha" \
+            -t nanoclaw-agent-base:publish "$base_context" >/dev/null
+          docker build --quiet --label "$source_label" --build-arg "BASE_IMAGE=nanoclaw-agent-base:publish" \
+            --build-arg "SOURCE_REVISION=$GITHUB_SHA" --build-arg "SOURCE_TREE=$source_tree" \
+            -t nanoclaw-agent:publish "$agent_context" >/dev/null
+          python3 scripts/privacy-image-audit.py --image nanoclaw-agent:publish \
+            --base-image nanoclaw-agent-base:publish --revision "$GITHUB_SHA" --tree "$source_tree"
+          docker build --quiet --label "$source_label" --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
+            --build-arg "SOURCE_TREE=$source_tree" -t nanoclaw-brokers:publish "$broker_context" >/dev/null
+          python3 scripts/privacy-image-audit.py --image nanoclaw-brokers:publish \
+            --base-image python:3.12-slim --revision "$GITHUB_SHA" --tree "$source_tree"
+      - name: Publish private GHCR candidates and create immutable manifest
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          package_visibility() {
+            local name="$1" status
+            status="$(curl -sS -o "$RUNNER_TEMP/ghcr-package.json" -w '%{http_code}' \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer $GHCR_TOKEN" \
+              "https://api.github.com/orgs/olaClaw/packages/container/$name")"
+            case "$status" in
+              200) jq -er '.visibility' "$RUNNER_TEMP/ghcr-package.json" ;;
+              404) printf 'absent\n' ;;
+              *) echo 'GHCR package visibility check unavailable' >&2; return 1 ;;
+            esac
+          }
+          for name in nanoclaw-host nanoclaw-agent nanoclaw-brokers; do
+            visibility="$(package_visibility "$name")"
+            [[ "$visibility" = private || "$visibility" = absent ]]
+          done
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin >/dev/null
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          declare -A refs
+          for key in host agent brokers; do
+            name="nanoclaw-$key"
+            repository="ghcr.io/olaclaw/$name"
+            docker tag "$name:publish" "$repository:$GITHUB_SHA"
+            docker push "$repository:$GITHUB_SHA" >/dev/null
+            for attempt in 1 2 3 4 5; do
+              visibility="$(package_visibility "$name")"
+              if [ "$visibility" = private ]; then break; fi
+              if [ "$visibility" != absent ]; then exit 1; fi
+              sleep 2
+            done
+            [[ "$visibility" = private ]]
+            docker pull "$repository:$GITHUB_SHA" >/dev/null
+            ref="$(docker image inspect --format '{{json .RepoDigests}}' "$repository:$GITHUB_SHA" \
+              | jq -er --arg repository "$repository" '.[] | select(startswith($repository + "@sha256:"))')"
+            [[ "$ref" =~ ^ghcr\.io/olaclaw/nanoclaw-(host|agent|brokers)@sha256:[0-9a-f]{64}$ ]]
+            refs[$key]="$ref"
+          done
+          external="$(node -e 'const fs=require("fs"); const lines=fs.readFileSync(".env.example","utf8").split(/\r?\n/); const keys=["ONECLI_IMAGE","POSTGRES_IMAGE","SIGNAL_IMAGE"]; const data=Object.fromEntries(lines.filter(x=>keys.some(k=>x.startsWith(k+"="))).map(x=>x.split(/=(.*)/s).slice(0,2))); if(keys.some(k=>!data[k])) process.exit(1); process.stdout.write(keys.map(k=>data[k]).join("\n"))')"
+          mapfile -t external_refs <<< "$external"
+          node scripts/compose-release.mjs create --output "$RUNNER_TEMP/compose-release.json" \
+            --host "${refs[host]}" --agent "${refs[agent]}" --brokers "${refs[brokers]}" \
+            --onecli "${external_refs[0]}" --postgres "${external_refs[1]}" --signal "${external_refs[2]}"
+          node scripts/compose-release.mjs check --file "$RUNNER_TEMP/compose-release.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compose-release-${{ github.sha }}
+          path: ${{ runner.temp }}/compose-release.json
+          if-no-files-found: error
+          retention-days: 14

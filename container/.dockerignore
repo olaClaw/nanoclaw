@@ -1,2 +1,9 @@
-agent-runner/node_modules
-agent-runner/dist
+**
+!Dockerfile
+!.dockerignore
+!agent-runner/
+!agent-runner/package.json
+!agent-runner/bun.lock
+!cli-tools.json
+!install-cli-tools.sh
+!entrypoint.sh

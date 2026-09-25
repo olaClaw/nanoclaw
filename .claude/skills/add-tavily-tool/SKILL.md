@@ -122,7 +122,7 @@ moment instead of dead-ending. For each selected group:
    ```
 
    If the value is a loopback or container-bridge address (`127.0.0.1`,
-   `172.17.0.1`, `host.docker.internal`), ask the operator which URL they open
+   `host.docker.internal` or a Docker bridge address), ask the operator which URL they open
    the OneCLI dashboard at, suggesting `http://127.0.0.1:10254` as the default.
    A public or tailnet `APP_URL` needs no question.
 2. Gate the deeplink: `curl -fs <dashboard-url>/connections/custom` must return

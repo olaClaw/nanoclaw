@@ -23,6 +23,7 @@ import {
   GROUPS_DIR,
   INSTALL_SLUG,
   TIMEZONE,
+  agentAssetsInImage,
 } from './config.js';
 import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
@@ -1001,6 +1002,7 @@ export async function buildMounts(
   providerSurfaces?: ProviderSpawnRealization,
 ): Promise<VolumeMount[]> {
   const projectRoot = process.cwd();
+  const assetsInImage = agentAssetsInImage();
 
   const contract = getProviderHostContract(provider);
   // Undeclared payloads stay on the legacy capability gate. Declared payloads
@@ -1153,26 +1155,29 @@ export async function buildMounts(
     });
   }
 
-  // Shared agent-runner source — read-only, same code for all groups.
-  const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
-  mounts.push({
-    hostPath: agentRunnerSrc,
-    containerPath: '/app/src',
-    readonly: true,
-    mountClass: 'install-surface',
-    scope,
-  });
-
-  // Shared skills — read-only, symlinks in .claude-shared/skills/ point here.
-  const skillsSrc = path.join(projectRoot, 'container', 'skills');
-  if (fs.existsSync(skillsSrc)) {
+  // Legacy images need these read-only host mounts. Self-contained images
+  // provide the same /app paths directly, so no checkout source is mounted.
+  if (!assetsInImage) {
+    const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
     mounts.push({
-      hostPath: skillsSrc,
-      containerPath: '/app/skills',
+      hostPath: agentRunnerSrc,
+      containerPath: '/app/src',
       readonly: true,
       mountClass: 'install-surface',
       scope,
     });
+
+    // Shared skills — symlinks in .claude-shared/skills/ point here.
+    const skillsSrc = path.join(projectRoot, 'container', 'skills');
+    if (fs.existsSync(skillsSrc)) {
+      mounts.push({
+        hostPath: skillsSrc,
+        containerPath: '/app/skills',
+        readonly: true,
+        mountClass: 'install-surface',
+        scope,
+      });
+    }
   }
 
   // Additional mounts from container config — already vetted by the allowlist.

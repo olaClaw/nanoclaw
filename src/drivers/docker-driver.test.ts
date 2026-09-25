@@ -53,6 +53,22 @@ beforeEach(() => {
 });
 
 describe('spec realization', () => {
+  it('verifies the agent image revision before creating a Compose session', async () => {
+    const expected = 'a'.repeat(40);
+    cli.responses.unshift({ match: /^image inspect /, output: expected + '\n' });
+    const d = new DockerSessionDriver({ ...FIXTURE_POLICY, cli, expectedImageRevision: expected });
+    await d.prepare(fixtureSpec());
+    expect(cli.callMatching(/^image inspect /)?.args.at(-1)).toBe('nanoclaw-agent:spike-p0');
+    expect(createArgs()).toBeDefined();
+  });
+
+  it('refuses an agent image from another revision before creating a session', async () => {
+    cli.responses.unshift({ match: /^image inspect /, output: 'b'.repeat(40) });
+    const d = new DockerSessionDriver({ ...FIXTURE_POLICY, cli, expectedImageRevision: 'a'.repeat(40) });
+    await expect(d.prepare(fixtureSpec())).rejects.toMatchObject({ kind: 'spec-invalid', retryable: false });
+    expect(cli.callMatching(/^create /)).toBeUndefined();
+  });
+
   it('emits the agent container with its image, entrypoint split and canonical labels', async () => {
     await driver().prepare(fixtureSpec());
     const args = createArgs();
