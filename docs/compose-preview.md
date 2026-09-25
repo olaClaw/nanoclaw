@@ -96,8 +96,9 @@ subdirectory before starting Compose. Outbound attachments are
 created in `/srv/nanoclaw/signal-outbox` with mode 0600; Signal sees that
 directory read-only and NanoClaw removes each file after sending. Both
 containers use UID 1000, so both bind sources must be owned by that UID.
-`SIGNAL_IMAGE` remains an unusable placeholder until a specific image digest
-is reviewed. Starting a second daemon with a copied live account would also
+`SIGNAL_IMAGE` in `.env.example` selects the official signal-cli 0.14.8 image
+by an immutable digest. Its `--version` command was checked locally without an
+account. Starting a second daemon with a copied live account would also
 be unsafe; use a test identity for the first runtime check.
 
 `ONECLI_DB_PASSWORD_FILE` must point to an operator-owned file outside Git
@@ -107,9 +108,14 @@ OneCLI. The latter builds its required `DATABASE_URL` inside the container;
 the password does not enter Compose interpolation or image metadata. Never
 print the resolved Compose configuration with real secrets or capture it in CI.
 
-The `ONECLI_IMAGE` example is deliberately unusable. The fork currently pins
-OneCLI 1.41.0, while the upstream [changelog](https://github.com/onecli/onecli/blob/main/CHANGELOG.md)
-reports a credential-injection host-enforcement fix in 1.42.0. Review a newer
-version and its compatibility with this fork before selecting an image for a
-deployment. The PostgreSQL image must also be pinned to an immutable digest
-for the release. Static validation with `.env.example` is not a runtime test.
+The fork pins OneCLI 1.43.3 and `.env.example` selects its official multi-architecture
+image by an immutable digest. The upstream [changelog](https://github.com/onecli/onecli/blob/main/CHANGELOG.md)
+reports a credential-injection host-enforcement fix in 1.42.0; 1.43.3 also
+contains the later shared-host injection fix. The image's entrypoint uses
+`tini`, which the Compose password wrapper explicitly starts. These checks
+establish the image version and startup contract, not SDK or database migration
+compatibility. Verify the gateway against a synthetic database before release.
+The example pins the official PostgreSQL 18.6 Alpine image by its immutable
+multi-architecture digest. Recheck all three external digests when preparing
+the release; pinning prevents silent updates, including security fixes.
+Static validation with `.env.example` is not a runtime test.

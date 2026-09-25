@@ -153,7 +153,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    # OneCLI 1.41.0 needs DATABASE_URL, not a _FILE setting. Construct it
+    # OneCLI 1.43.3 needs DATABASE_URL, not a _FILE setting. Construct it
     # inside the container from a hex-only password file to keep the value out
     # of Compose interpolation, image metadata and configuration output.
     entrypoint: [/bin/sh, -ec]
@@ -163,7 +163,7 @@ services:
         [ "$${#password}" -eq 64 ] || exit 1
         case "$$password" in *[!0-9a-fA-F]*) exit 1;; esac
         export DATABASE_URL="postgresql://onecli:$$password@postgres:5432/onecli"
-        exec /app/entrypoint.sh
+        exec /sbin/tini -- /app/entrypoint.sh
     environment:
       APP_URL: http://127.0.0.1:10254
       GATEWAY_API_URL: http://127.0.0.1:10255
