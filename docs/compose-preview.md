@@ -107,6 +107,13 @@ containing exactly 64 hexadecimal characters (for example, the output of
 OneCLI. The latter builds its required `DATABASE_URL` inside the container;
 the password does not enter Compose interpolation or image metadata. Never
 print the resolved Compose configuration with real secrets or capture it in CI.
+OneCLI runs as UID 1000 and must be able to read the mounted file. On the
+target Docker host, give the file that UID as owner and mode `0400`, then check
+readability with a disposable secret before loading real credentials. A rootless
+Podman bind mount may map the host UID differently: a synthetic `0600` file
+was not readable in the local test, while a readable test file started the
+service. Do not broaden permissions on a real password to work around a UID
+mapping mismatch.
 
 The fork pins OneCLI 1.43.3 and `.env.example` selects its official multi-architecture
 image by an immutable digest. The upstream [changelog](https://github.com/onecli/onecli/blob/main/CHANGELOG.md)
@@ -119,3 +126,29 @@ The example pins the official PostgreSQL 18.6 Alpine image by its immutable
 multi-architecture digest. Recheck all three external digests when preparing
 the release; pinning prevents silent updates, including security fixes.
 Static validation with `.env.example` is not a runtime test.
+
+An isolated local runtime test used the pinned OneCLI and PostgreSQL images,
+new volumes, an internal network and synthetic credentials. OneCLI 1.43.3
+applied its migrations, created 41 public tables and returned healthy
+`/v1/health` and gateway `/healthz` responses. The fork's installed
+`@onecli-sh/sdk` created a synthetic agent, treated a repeat `ensureAgent`
+as already existing and fetched a usable container configuration without
+printing its tokens or certificate. A custom-format `pg_dump` restored into a
+second database with 41 tables, 82 migration records and two agents. A copy
+of `/app/data`, including the encryption key and gateway CA, was mounted into
+a second OneCLI container; the same agent and configuration remained usable.
+The Compose password-file wrapper was also exercised on that restored state,
+with `tini` verified as PID 1. All test containers, volumes, network and
+temporary files were removed afterward.
+
+For the future backup procedure, quiesce NanoClaw and OneCLI, keep PostgreSQL
+running long enough to take a custom-format database dump, and copy the entire
+OneCLI `/app/data` volume in the same maintenance window. Preserve the
+encryption key with mode `0600` inside a private backup directory. Include
+NanoClaw's `data`, `groups`, `store`, configuration, templates, Signal state,
+private secrets and the release manifest in the same recovery set. Restore
+into fresh volumes and directories, verify ownership and permissions, start
+PostgreSQL and OneCLI at the recorded image digests, then verify an existing
+agent through the SDK before starting NanoClaw or Signal. This sequence is a
+design backed by the isolated OneCLI test; the complete stack's backup and
+restore still need an end-to-end rehearsal with test identities.
