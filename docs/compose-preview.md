@@ -2,10 +2,11 @@
 
 `compose.yaml` describes NanoClaw, PostgreSQL, OneCLI, Signal, two read-only
 brokers and a TCP-only egress proxy. They are behind the `core-preview` profile so a plain
-`docker compose up` does not start a partial stack. It has **not** been deployed
-or tested against an operational gateway or calendar. The bootstrap gate is
-implemented but not yet exercised on a complete stack. The administrative
-panel still needs Compose integration.
+`docker compose up` does not start a partial stack. The profile has been exercised
+locally with synthetic state through Podman's Docker-compatible API, but has
+not been deployed on the target Docker host or tested with real channel,
+calendar or model credentials. The administrative panel still needs Compose
+integration.
 
 The image runs from `/srv/nanoclaw`, matching the absolute path on the Docker
 daemon host. This matters because NanoClaw asks that daemon to bind-mount
@@ -41,12 +42,11 @@ bootstrap is not an updater or an import path for existing data.
 
 The image healthcheck connects to the live `data/ncl.sock` Unix socket. It
 detects a running CLI listener, but does not establish that the gateway,
-channels or model endpoint are healthy. The final stack needs service-level
+channels or model endpoint are healthy. The profile includes service-level
 health checks, network isolation and a bootstrap that records the installed
-release before the host can start. Although the static gates are implemented,
-the complete stack and its recovery path have not been tested. Validate the
-file with synthetic values and do not run the preview profile on the
-installation.
+release before the host can start. These checks passed in the synthetic Podman
+rehearsal described below; full recovery and a target-Docker rehearsal remain
+open. Do not run the preview profile on the installation.
 
 The `agent-egress` network has the fixed name `nanoclaw-egress` and is internal.
 Compose creates it before NanoClaw starts. Agents can resolve the two brokers
@@ -78,7 +78,9 @@ access to this read-only broker, but it does not make the upstream Nextcloud
 credential read-only. Use an account with the narrowest calendar access
 available and keep the credential out of agent containers.
 
-OneCLI and PostgreSQL use separate persistent volumes. PostgreSQL only joins
+OneCLI and PostgreSQL use separate persistent volumes. NanoClaw's OneCLI SDK
+uses OneCLI's web API on port 10254; only the agent-facing proxy forwards to
+the gateway on port 10255. PostgreSQL only joins
 the internal `db` network; OneCLI joins `db` and `gateway`. The NanoClaw host
 joins `gateway` and forces its agent sessions onto a separate internal egress
 network. The `onecli-egress` proxy joins that agent network through Compose
@@ -126,6 +128,25 @@ The example pins the official PostgreSQL 18.6 Alpine image by its immutable
 multi-architecture digest. Recheck all three external digests when preparing
 the release; pinning prevents silent updates, including security fixes.
 Static validation with `.env.example` is not a runtime test.
+
+An integrated local Podman rehearsal used a temporary Compose copy with bind
+sources under a private temporary directory, synthetic broker configuration,
+an unused model endpoint and no linked Signal account. The three audited fork
+images had matching commit/tree labels, and all six images were pinned in a
+temporary release manifest. Bootstrap accepted an empty data directory,
+created the `0600` marker and rejected a second bootstrap on the same data.
+PostgreSQL, OneCLI, both brokers, the egress proxy and NanoClaw reached their
+health checks. From the agent network, the proxy and brokers were reachable;
+the database, OneCLI dashboard and Signal were not. The installed OneCLI SDK
+created and reread a synthetic agent through the host's configured API URL.
+A host restart retained the database and marker and passed the release and
+socket health checks again. This exercise revealed that the pinned OneCLI
+image exposes no healthcheck metadata to Podman, so Compose now declares one
+explicitly, and that the SDK needs port 10254 rather than the gateway's 10255.
+Podman's Docker-compatible API rejected the host's cleanup filter for the
+Docker `dead` state; startup continued, but this filter still needs a target
+Docker check. No real message delivery, authenticated CalDAV request, model
+inference, agent session or full-stack backup/restore was exercised.
 
 An isolated local runtime test used the pinned OneCLI and PostgreSQL images,
 new volumes, an internal network and synthetic credentials. OneCLI 1.43.3

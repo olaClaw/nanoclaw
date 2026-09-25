@@ -36,7 +36,7 @@ services:
       NANOCLAW_EGRESS_LOCKDOWN: 'true'
       NANOCLAW_EGRESS_NETWORK: nanoclaw-egress
       ONECLI_GATEWAY_CONTAINER: onecli-egress
-      ONECLI_URL: http://onecli:10255
+      ONECLI_URL: http://onecli:10254
       SIGNAL_MANAGE_DAEMON: 'false'
       SIGNAL_TCP_HOST: signal-cli
       SIGNAL_TCP_PORT: '7583'
@@ -172,6 +172,18 @@ services:
       - onecli-data:/app/data
     ports:
       - '127.0.0.1:10254:10254'
+    # Declare this here because the pinned image has no OCI healthcheck metadata.
+    # onecli-egress waits for service_healthy before starting.
+    healthcheck:
+      test:
+        [
+          CMD-SHELL,
+          'wget -qO- http://127.0.0.1:10254/v1/health >/dev/null && wget -qO- http://127.0.0.1:10255/healthz >/dev/null',
+        ]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
     networks: [gateway, db]
 
   onecli-egress:
