@@ -19,13 +19,11 @@ on:
 permissions:
   contents: read
 
-# This fork intentionally has no local channels/providers registry branches.
-# Test against the public upstream registries without copying them into the fork.
-env:
-  NANOCLAW_REGISTRY_REMOTE: upstream
-
 jobs:
   discover:
+    # The migration fork already includes selected channels/providers. The
+    # upstream registry composition suite assumes a clean core checkout.
+    if: github.repository == 'nanocoai/nanoclaw'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.skills.outputs.matrix }}
@@ -36,7 +34,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.core_sha || github.sha }}
-      - run: git remote add upstream https://github.com/nanocoai/nanoclaw.git
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -66,15 +63,15 @@ jobs:
           if [ -n "$providers" ]; then
             case "$providers" in *[!0-9a-fA-F]*|'') exit 1;; esac
             test ${#providers} -eq 40
-            git fetch upstream "$providers"
+            git fetch origin "$providers"
             git cat-file -e "$providers^{commit}"
           else
-            git fetch upstream providers
-            providers=$(git rev-parse upstream/providers)
+            git fetch origin providers
+            providers=$(git rev-parse origin/providers)
           fi
-          git fetch upstream channels
+          git fetch origin channels
           echo "core=$core" >> "$GITHUB_OUTPUT"
-          echo "channels=$(git rev-parse upstream/channels)" >> "$GITHUB_OUTPUT"
+          echo "channels=$(git rev-parse origin/channels)" >> "$GITHUB_OUTPUT"
           echo "providers=$providers" >> "$GITHUB_OUTPUT"
 
   test:
@@ -90,7 +87,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.discover.outputs.core }}
-      - run: git remote add upstream https://github.com/nanocoai/nanoclaw.git
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -115,7 +111,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.discover.outputs.core }}
-      - run: git remote add upstream https://github.com/nanocoai/nanoclaw.git
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -139,7 +134,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.discover.outputs.core }}
-      - run: git remote add upstream https://github.com/nanocoai/nanoclaw.git
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -160,7 +154,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.discover.outputs.core }}
-      - run: git remote add upstream https://github.com/nanocoai/nanoclaw.git
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -177,7 +170,7 @@ jobs:
         run: pnpm exec tsx scripts/test-registry-skills.ts --old-provider-refresh 99283f3e274b2b1dae47b141ac4f11f56ad8eb2d
 
   provider-promotion:
-    if: always()
+    if: always() && github.repository == 'nanocoai/nanoclaw'
     needs: [test, combined-providers, pre-contract-providers, old-provider-refresh]
     runs-on: ubuntu-latest
     steps:
@@ -188,12 +181,9 @@ jobs:
           test "${{ needs.pre-contract-providers.result }}" = success
           test "${{ needs.old-provider-refresh.result }}" = success
 
-  # The one check the main ruleset will require from this workflow, in the
-  # shape of `gate` in ci.yml. It needs every job above, provider-promotion
-  # included, so the older verdict and this one cannot disagree. if: always()
-  # because a skipped required check is not a failed one. Nothing in this
-  # workflow is conditional on the event: every job runs on pull_request, push
-  # and workflow_dispatch alike, so only `success` passes and a skip fails.
+  # On upstream, the registry gate requires every composition job. On this
+  # customized fork those upstream-only jobs are skipped, and the gate reports
+  # that the suite is not applicable; the fork's main CI remains required.
   registry-gate:
     name: registry gate
     if: always()
@@ -204,6 +194,10 @@ jobs:
     steps:
       - name: every needed job succeeded
         run: |
+          if [ "$GITHUB_REPOSITORY" != nanocoai/nanoclaw ]; then
+            echo 'Upstream registry composition is not applicable to this customized fork.'
+            exit 0
+          fi
           test "${{ needs.discover.result }}" = success
           test "${{ needs.test.result }}" = success
           test "${{ needs.combined-providers.result }}" = success

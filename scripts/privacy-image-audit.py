@@ -181,6 +181,7 @@ def image_layers(runtime, image):
 
 
 def main():
+    stage = "arguments"
     parser = argparse.ArgumentParser()
     parser.add_argument("--archive", type=Path)
     parser.add_argument("--base-layers", type=int)
@@ -198,25 +199,32 @@ def main():
         else:
             if not args.image or not args.base_image or args.base_layers is not None:
                 raise ValueError("invalid image arguments")
+            stage = "inspect-base"
             base = image_layers(args.runtime, args.base_image)
+            stage = "inspect-image"
             current = image_layers(args.runtime, args.image)
+            stage = "compare-layers"
             if current[:len(base)] != base:
                 raise ValueError("base layers do not match")
             base_layers = len(base)
+        stage = "load-upstream-baseline"
         accepted = accepted_upstream_candidates()
         if args.archive:
+            stage = "scan-archive"
             counts = check_archive(archive, base_layers, accepted, args.revision, args.tree)
         else:
             with tempfile.TemporaryDirectory(prefix="nanoclaw-image-audit-") as temp:
                 archive = Path(temp) / "image.tar"
+                stage = "save-image"
                 subprocess.run([args.runtime, "image", "save", "-o", str(archive), args.image],
                                check=True, capture_output=True)
+                stage = "scan-archive"
                 counts = check_archive(archive, base_layers, accepted, args.revision, args.tree)
         print("privacy image audit:", "pass" if not counts else "blocked")
         print(json.dumps({"categories": counts, "new_layers": "checked"}))
         return 0 if not counts else 1
-    except Exception:
-        print("privacy image audit: unavailable; no source values printed")
+    except Exception as error:
+        print(f"privacy image audit: unavailable at {stage} ({type(error).__name__}); no source values printed")
         return 1
 
 

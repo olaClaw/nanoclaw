@@ -157,6 +157,10 @@ jobs:
           broker_context="$(node scripts/compose-context.mjs --stage broker)"
           lock_sha="$(sha256sum "$base_context/agent-runner/bun.lock" | cut -d' ' -f1)"
           source_tree="$(git rev-parse 'HEAD^{tree}')"
+          # BuildKit may fetch bases without tagging them in the Docker image store.
+          # The audit needs the exact local base images to compare layer ancestry.
+          docker pull node:22-slim >/dev/null
+          docker pull python:3.12-slim >/dev/null
           docker build --quiet --build-arg "SOURCE_REVISION=$GITHUB_SHA" --build-arg "SOURCE_TREE=$source_tree" \
             -t nanoclaw-host:review "$host_context" >/dev/null
           docker image inspect --format '{{json .Config.Healthcheck}}' nanoclaw-host:review | grep -Fq deploy/healthcheck.mjs
@@ -263,6 +267,8 @@ jobs:
           lock_sha="$(sha256sum "$base_context/agent-runner/bun.lock" | cut -d' ' -f1)"
           source_tree="$(git rev-parse 'HEAD^{tree}')"
           source_label="org.opencontainers.image.source=https://github.com/olaClaw/nanoclaw"
+          docker pull node:22-slim >/dev/null
+          docker pull python:3.12-slim >/dev/null
           docker build --quiet --label "$source_label" --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
             --build-arg "SOURCE_TREE=$source_tree" -t nanoclaw-host:publish "$host_context" >/dev/null
           docker image inspect --format '{{json .Config.Healthcheck}}' nanoclaw-host:publish | grep -Fq deploy/healthcheck.mjs
