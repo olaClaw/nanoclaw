@@ -57,6 +57,7 @@ jobs:
           python3 scripts/compose-recovery.test.py
           python3 scripts/compose-cutover.test.py
           python3 scripts/compose-release-update.test.py
+          python3 scripts/compose-import-legacy.test.py
           python3 scripts/compose-rehearsal.test.py
 
   test:
