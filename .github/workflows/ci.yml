@@ -52,6 +52,11 @@ jobs:
           python3 deploy/nextcloud-calendar-broker.test.py
       - name: Test redacted image-layer audit
         run: python3 scripts/privacy-image-audit.test.py
+      - name: Test private Compose recovery archive
+        run: |
+          python3 scripts/compose-recovery.test.py
+          python3 scripts/compose-cutover.test.py
+          python3 scripts/compose-rehearsal.test.py
 
   test:
     runs-on: ubuntu-latest
