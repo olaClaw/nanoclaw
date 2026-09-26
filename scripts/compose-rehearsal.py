@@ -168,7 +168,7 @@ def rehearse(args):
         RECOVERY.not_nested(root, state)
     RECOVERY.not_nested(work_root, backup)
     RECOVERY.not_nested(work_root, key.parent)
-    if work_root.stat().st_dev != state.parent.stat().st_dev:
+    if work_root.stat().st_dev != state.stat().st_dev:
         RECOVERY.fail('work_root_cross_filesystem')
     synthetic_config_only(project / '.env')
 

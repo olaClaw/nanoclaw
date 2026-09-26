@@ -176,6 +176,11 @@ def volume_mount(project, service, destination):
     return mount
 
 
+def running_profile_services(project):
+    return tuple(service for service in (*STOP_SERVICES, 'postgres')
+                 if compose(project, 'ps', '-q', service).decode().strip())
+
+
 def checked_members(archive):
     found = set()
     kinds = {}
@@ -232,11 +237,10 @@ def archive_sources(archive, state, env_file, onecli_data, extras):
 
 def preserve_numeric_metadata(item, destination):
     # checked_members excludes hard links and defers the permitted symlinks.
-    # Keep tar_filter's path check, but do not use data_filter: it clears
-    # uid/gid, which makes the restored UID 1000 services unable to read
-    # their state and private bind mounts.
-    tarfile.tar_filter(item, destination)
-    return item.replace(uname='', gname='', deep=False)
+    # Keep tar_filter's safe path and mode, while retaining numeric uid/gid:
+    # data_filter clears ownership needed by UID 1000 services.
+    filtered = tarfile.tar_filter(item, destination)
+    return filtered.replace(uname='', gname='', deep=False)
 
 
 def extract_checked(archive, target):
@@ -309,6 +313,9 @@ def backup(args):
     onecli_data = volume_mount(project, 'onecli', '/app/data')
     volume_mount(project, 'postgres', '/var/lib/postgresql')
     running_agents(install)
+    running_services = running_profile_services(project)
+    if 'postgres' not in running_services:
+        fail('postgres_not_running')
     print('backup_preflight=ok', flush=True)
     if not args.apply:
         return
@@ -367,7 +374,7 @@ def backup(args):
         dump.unlink(missing_ok=True)
         if stopped:
             try:
-                compose(project, 'up', '-d', '--wait')
+                compose(project, 'start', '--wait', *running_services)
                 print('original_stack=healthy', flush=True)
             except Exception:
                 print('original_stack=restart_failed', flush=True)

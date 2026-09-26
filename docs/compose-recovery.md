@@ -36,7 +36,8 @@ writers, dumps PostgreSQL while it is still running, then stops PostgreSQL and
 archives NanoClaw state, `.env`, OneCLI `/app/data`, and the broker/password
 files named by `.env`. It encrypts the archive and dump, removes the plaintext
 intermediates, records checksums and an HMAC-authenticated manifest, and
-attempts to restart the original stack even on failure. Plaintext archives
+attempts to restart only the services that were running before the backup,
+even on failure. Services already stopped stay stopped. Plaintext archives
 exist briefly in the private backup directory while encryption runs; use a
 host with suitably protected storage. Status output is
 redacted; inspect the private output roots locally to identify the new pair.
@@ -77,8 +78,9 @@ recreate their sockets on startup. It preserves only symbolic links below
 `state/data/` whose absolute target is under the container's `/app` tree,
 without following them on the host. Extraction writes regular files and
 directories first, then recreates those validated links; all other links,
-hard links and unsafe member paths are rejected. Do not run
-two NanoClaw hosts against the same state or agent containers. A future live
+hard links and unsafe member paths are rejected. The extractor retains numeric
+UID/GID but strips setuid/setgid/sticky bits and group/other write bits. Never
+run two NanoClaw hosts against the same state or agent containers. A future live
 restore must create new OneCLI/PostgreSQL volumes, restore the PostgreSQL dump,
 check ownership and service health, and provide a rollback path before
 switching the host. Neither `verify` nor `stage` performs those operations.
@@ -144,8 +146,9 @@ recovery, not an automatic retry. This script is **not a production migration
 or update command**. It passed a full backup, restore and automatic rollback
 on the isolated Docker LXC with synthetic state, including `READY` prompts on
 the restored copy and the original. The first runs exposed lost UID/GID during
-archive extraction; the corrected staging preserves numeric owners and modes,
-and the final rehearsal passed. Do not run it with real channel identities,
+archive extraction; the corrected staging preserves numeric owners and safe
+modes, and the final rehearsal passed before the later mode-bit hardening.
+Do not run it with real channel identities,
 credentials or workloads. A root-only LXC `--preflight` and separate review are
 required before its first `--apply` run; no production use is authorized.
 

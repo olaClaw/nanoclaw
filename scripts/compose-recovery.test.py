@@ -11,6 +11,7 @@ import unittest
 from argparse import Namespace
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).with_name('compose-recovery.py')
@@ -63,7 +64,7 @@ class ComposeRecoveryTests(unittest.TestCase):
                 with self.assertRaisesRegex(RECOVERY.RecoveryError, 'archive_member_unsafe'):
                     RECOVERY.checked_members(archive)
 
-    def test_extraction_preserves_numeric_owner_and_mode_with_path_guard(self):
+    def test_extraction_preserves_numeric_owner_and_filters_unsafe_mode(self):
         with tempfile.TemporaryDirectory() as temp:
             item = tarfile.TarInfo('state/data/example')
             item.uid = 1000
@@ -72,11 +73,22 @@ class ComposeRecoveryTests(unittest.TestCase):
             item.gname = 'nonportable-group'
             item.mode = 0o660
             filtered = RECOVERY.preserve_numeric_metadata(item, temp)
-            self.assertEqual((filtered.uid, filtered.gid, filtered.mode), (1000, 1001, 0o660))
+            self.assertEqual((filtered.uid, filtered.gid, filtered.mode), (1000, 1001, 0o640))
             self.assertEqual((filtered.uname, filtered.gname), ('', ''))
+            item.mode = 0o7755
+            self.assertEqual(RECOVERY.preserve_numeric_metadata(item, temp).mode, 0o755)
             unsafe = tarfile.TarInfo('../outside')
             with self.assertRaises(tarfile.FilterError):
                 RECOVERY.preserve_numeric_metadata(unsafe, temp)
+
+    def test_running_profile_services_excludes_stopped_services(self):
+        def mocked_compose(_project, *args):
+            self.assertEqual(args[:2], ('ps', '-q'))
+            return b'container-id\n' if args[2] in ('nanoclaw', 'postgres') else b''
+
+        with patch.object(RECOVERY, 'compose', side_effect=mocked_compose):
+            self.assertEqual(RECOVERY.running_profile_services(Path('/fixture')),
+                             ('nanoclaw', 'postgres'))
 
     def test_source_hardlink_fails_instead_of_silently_disappearing(self):
         with tempfile.TemporaryDirectory() as temp:
