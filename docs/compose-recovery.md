@@ -94,6 +94,11 @@ These commands are not a substitute for testing backup restoration with
 separate identities before migrating a real agent. Preserve the old machine
 and its encrypted backup until the migrated instance has been checked.
 
+For a same-version, digest-pinned **synthetic-only** release update after a
+verified backup, see [Compose release update](compose-release-update.md).
+That transaction does not restore database state and is not a production
+upgrade path.
+
 ## Cutover preflight (read-only)
 
 After a successful `verify` and `stage`, `scripts/compose-cutover.py` checks
