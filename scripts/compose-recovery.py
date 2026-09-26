@@ -181,6 +181,14 @@ def running_profile_services(project):
                  if compose(project, 'ps', '-q', service).decode().strip())
 
 
+def resume_profile_services(project, services):
+    # start SERVICE follows Compose dependencies and can revive a service that
+    # was intentionally stopped before the backup. Reuse existing containers
+    # and start only the services observed running before the backup.
+    compose(project, 'up', '-d', '--wait', '--no-deps', '--no-recreate',
+            '--no-build', '--pull', 'never', *services)
+
+
 def checked_members(archive):
     found = set()
     kinds = {}
@@ -374,7 +382,7 @@ def backup(args):
         dump.unlink(missing_ok=True)
         if stopped:
             try:
-                compose(project, 'start', '--wait', *running_services)
+                resume_profile_services(project, running_services)
                 print('original_stack=healthy', flush=True)
             except Exception:
                 print('original_stack=restart_failed', flush=True)

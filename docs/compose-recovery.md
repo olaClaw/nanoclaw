@@ -147,10 +147,11 @@ or update command**. On the isolated Docker LXC, the latest rehearsal verified
 an authenticated synthetic backup, staged it with numeric ownership and safe
 modes, restored onto fresh volumes, and rolled back automatically with `READY`
 prompts on both sides. The selective service restart after creating a backup
-is covered by local tests; this rehearsal used an existing backup. Do not run
-it with real channel identities, credentials or workloads. A root-only LXC
-`--preflight` and separate review are required before its first `--apply` run;
-no production use is authorized.
+was also tested on the synthetic LXC: a deliberately stopped service stayed
+stopped, previously running services returned, and the new encrypted backup
+verified. Do not run it with real channel identities, credentials or workloads.
+A root-only LXC `--preflight` and separate review are required before its first
+`--apply` run; no production use is authorized.
 
 If restore fails after stopping the original, the script prints a fixed
 `restore_failed_phase` label and only the Compose service state/health enums

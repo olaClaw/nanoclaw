@@ -82,13 +82,23 @@ class ComposeRecoveryTests(unittest.TestCase):
                 RECOVERY.preserve_numeric_metadata(unsafe, temp)
 
     def test_running_profile_services_excludes_stopped_services(self):
+        commands = []
+
         def mocked_compose(_project, *args):
-            self.assertEqual(args[:2], ('ps', '-q'))
-            return b'container-id\n' if args[2] in ('nanoclaw', 'postgres') else b''
+            commands.append(args)
+            if args[:2] == ('ps', '-q'):
+                return b'container-id\n' if args[2] in ('nanoclaw', 'postgres') else b''
+            return b''
 
         with patch.object(RECOVERY, 'compose', side_effect=mocked_compose):
-            self.assertEqual(RECOVERY.running_profile_services(Path('/fixture')),
-                             ('nanoclaw', 'postgres'))
+            running = RECOVERY.running_profile_services(Path('/fixture'))
+            self.assertEqual(running, ('nanoclaw', 'postgres'))
+            RECOVERY.resume_profile_services(Path('/fixture'), running)
+        restart = commands[-1]
+        self.assertEqual(restart[:4], ('up', '-d', '--wait', '--no-deps'))
+        self.assertIn('--no-recreate', restart)
+        self.assertEqual(restart[-2:], ('nanoclaw', 'postgres'))
+        self.assertNotIn('nextcloud-calendar', restart)
 
     def test_source_hardlink_fails_instead_of_silently_disappearing(self):
         with tempfile.TemporaryDirectory() as temp:
