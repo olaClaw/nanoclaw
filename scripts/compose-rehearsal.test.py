@@ -74,7 +74,7 @@ class ComposeRehearsalTests(unittest.TestCase):
             args = Namespace(apply=not preflight, preflight=preflight,
                              confirm_synthetic=True,
                              project_root=str(project), state_root=str(state),
-                             stage_dir=str(root / 'prior-stage'), backup_dir=str(backup),
+                             backup_dir=str(backup),
                              key_file=str(key), work_root=str(work_root))
 
             def stage_backup(options):
@@ -115,7 +115,7 @@ class ComposeRehearsalTests(unittest.TestCase):
 
             prompts = [0]
             output = io.StringIO()
-            with (patch.object(REHEARSAL.CUTOVER, 'preflight'),
+            with (patch.object(REHEARSAL.CUTOVER, 'preflight') as cutover_preflight,
                   patch.object(REHEARSAL, 'synthetic_state_only'),
                   patch.object(REHEARSAL.RECOVERY, 'read_env_paths', return_value=('fixture', {})),
                   patch.object(REHEARSAL.RECOVERY, 'verify_or_stage', side_effect=stage_backup),
@@ -135,6 +135,8 @@ class ComposeRehearsalTests(unittest.TestCase):
                         REHEARSAL.rehearse(args)
                 else:
                     REHEARSAL.rehearse(args)
+            cutover_preflight.assert_called_once()
+            self.assertTrue(Path(cutover_preflight.call_args.args[0].stage_dir).is_dir())
             self.assertEqual((state / 'original-marker').read_text(), 'original')
             if preflight:
                 self.assertEqual(prompts[0], 0)

@@ -180,7 +180,6 @@ def rehearse(args):
         except BlockingIOError:
             RECOVERY.fail('rehearsal_already_running')
 
-        CUTOVER.preflight(args)
         synthetic_state_only(state)
         install, _ = RECOVERY.read_env_paths(project / '.env')
         old_onecli, _ = mount_details(project, 'onecli', '/app/data')
@@ -287,7 +286,6 @@ def main():
     parser = RECOVERY.PrivateArgumentParser(description=__doc__)
     parser.add_argument('--project-root', required=True)
     parser.add_argument('--state-root', required=True)
-    parser.add_argument('--stage-dir', required=True)
     parser.add_argument('--backup-dir', required=True)
     parser.add_argument('--key-file', required=True)
     parser.add_argument('--work-root', required=True)

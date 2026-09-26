@@ -131,8 +131,8 @@ runtime switch and rollback. The command refuses
 non-CLI messaging groups and nonempty Telegram/Signal account settings, and
 acquires an exclusive lock. It authenticates the encrypted backup and creates
 a **fresh** staged copy under an operator-provided root-only work directory on
-the same filesystem as the active state; it never trusts the previously staged
-copy as its restore input. The fresh copy passes the read-only preflight before
+the same filesystem as the active state; no previous staging directory is
+required. The fresh copy passes the read-only preflight before
 the original is stopped. It then switches the state path, restores OneCLI and
 PostgreSQL into new named volumes, checks health and a synthetic CLI `READY`
 prompt, and always attempts to return to the original state and original
