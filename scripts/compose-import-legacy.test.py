@@ -33,6 +33,10 @@ def add(stream, name, *, data=None, kind='file', target=None):
         info.type = tarfile.SYMTYPE
         info.linkname = target
         stream.addfile(info)
+    elif kind == 'hardlink':
+        info.type = tarfile.LNKTYPE
+        info.linkname = target
+        stream.addfile(info)
     else:
         payload = data or b'x'
         info.size = len(payload)
@@ -82,6 +86,32 @@ class MemberTests(unittest.TestCase):
                 add(stream, 'data', kind='dir')
             with self.assertRaises(IMPORT.ImportError_):
                 IMPORT.check_members(path)
+
+
+class HardlinkTests(unittest.TestCase):
+    def test_hardlink_to_earlier_file_in_same_area_is_accepted_and_extracted_as_one_inode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'a.tar'
+            archive(path, [('groups/g', {'kind': 'dir'}),
+                           ('groups/g/pkg-a', {'data': b'shared'}),
+                           ('groups/g/pkg-b', {'kind': 'hardlink', 'target': 'groups/g/pkg-a'})])
+            self.assertEqual(IMPORT.check_members(path)['groups/g/pkg-b'], 'hardlink')
+            target = Path(tmp) / 'out'
+            target.mkdir()
+            IMPORT.extract(path, target)
+            self.assertEqual((target / 'groups/g/pkg-a').stat().st_ino, (target / 'groups/g/pkg-b').stat().st_ino)
+
+    def test_hardlink_outside_its_area_or_to_a_missing_file_is_rejected(self):
+        for label, extra in {
+            'cross_area': [('groups/x', {'kind': 'hardlink', 'target': 'data/v2.db'})],
+            'missing': [('groups/x', {'kind': 'hardlink', 'target': 'groups/nope'})],
+            'escape': [('groups/x', {'kind': 'hardlink', 'target': '../etc/passwd'})],
+        }.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'a.tar'
+                archive(path, extra)
+                with self.assertRaises(IMPORT.ImportError_):
+                    IMPORT.check_members(path)
 
 
 class RewriteTests(unittest.TestCase):
@@ -206,6 +236,34 @@ class SnapshotTests(unittest.TestCase):
             (folder / 'manifest.json').write_text(json.dumps(payload))
             with self.assertRaises(SNAPSHOT.SnapshotError):
                 SNAPSHOT.verify(folder, key)
+
+    def test_failed_snapshot_leaves_no_folder_or_key_behind(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            out, keys = Path(tmp) / 'out', Path(tmp) / 'keys'
+            out.mkdir()
+            keys.mkdir()
+            ctx = {'project': Path(tmp), 'user': mock.Mock(pw_uid=1000, pw_gid=1000, pw_name='svc'),
+                   'output_root': out, 'key_root': keys, 'host_unit': 'nanoclaw-v2-x.service', 'slug': 'x',
+                   'mail_config': None}
+            live = {'head': 'a' * 40}
+            with mock.patch.object(SNAPSHOT, 'run', side_effect=SNAPSHOT.SnapshotError('command_failed')), \
+                    mock.patch('sys.stdout', new=io.StringIO()):
+                with self.assertRaises(SNAPSHOT.SnapshotError):
+                    SNAPSHOT.snapshot(ctx, live)
+            self.assertEqual(list(out.iterdir()), [])
+            self.assertEqual(list(keys.iterdir()), [])
+
+    def test_hardlinks_are_kept_by_the_snapshot_filter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'groups'
+            root.mkdir()
+            (root / 'a').write_text('x')
+            os.link(root / 'a', root / 'b')
+            with tarfile.open(Path(tmp) / 's.tar', 'w:') as stream:
+                stream.add(root, arcname='groups', filter=SNAPSHOT.archive_filter)
+            with tarfile.open(Path(tmp) / 's.tar', 'r:') as stream:
+                self.assertTrue(stream.getmember('groups/b').islnk())
 
     def test_cli_errors_are_redacted(self):
         secret = '/opt/secret-fixture/private-path'

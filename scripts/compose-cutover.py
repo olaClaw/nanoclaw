@@ -42,6 +42,7 @@ def valid_staged_members(stage):
         RECOVERY.fail('stage_env_permissions_unsafe')
     if (stage / 'postgres.dump').stat().st_size == 0:
         RECOVERY.fail('stage_dump_empty')
+    inodes = {}
     for root, directories, files in os.walk(stage, followlinks=False):
         for name in directories + files:
             item = Path(root) / name
@@ -56,7 +57,11 @@ def valid_staged_members(stage):
             elif not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
                 RECOVERY.fail('stage_member_unsafe')
             elif stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
-                RECOVERY.fail('stage_hardlink_unsafe')
+                entry = inodes.setdefault((info.st_dev, info.st_ino), [info.st_nlink, 0])
+                entry[1] += 1
+    # A hard link is acceptable only when every name of that file is inside the stage.
+    if any(seen != total for total, seen in inodes.values()):
+        RECOVERY.fail('stage_hardlink_unsafe')
 
 
 def checked_revision(project, state, stage):

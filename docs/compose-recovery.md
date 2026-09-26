@@ -77,9 +77,10 @@ The archive excludes transient sockets and other special files: services
 recreate their sockets on startup. It preserves only symbolic links below
 `state/data/` whose absolute target is under the container's `/app` tree,
 without following them on the host. Extraction writes regular files and
-directories first, then recreates those validated links; all other links,
-hard links and unsafe member paths are rejected. The extractor retains numeric
-UID/GID but strips setuid/setgid/sticky bits and group/other write bits. Never
+directories first, then recreates those validated links. A hard link is kept
+only when it points at a regular file already in the archive under the same
+top-level member; all other links and unsafe member paths are rejected. The
+extractor retains numeric UID/GID but strips setuid/setgid/sticky bits and group/other write bits. Never
 run two NanoClaw hosts against the same state or agent containers. A future live
 restore must create new OneCLI/PostgreSQL volumes, restore the PostgreSQL dump,
 check ownership and service health, and provide a rollback path before
