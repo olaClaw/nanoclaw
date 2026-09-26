@@ -99,6 +99,9 @@ def check_members(archive):
                 require(name.startswith(LINK_ROOTS), 'archive_link_unexpected')
                 links.add(name)
                 kinds[name] = 'link'
+            elif item.islnk():
+                require(RECOVERY.hardlink_target_ok(item, kinds), 'archive_member_unsafe')
+                kinds[name] = 'hardlink'
             elif item.isfile():
                 kinds[name] = 'file'
             elif item.isdir():

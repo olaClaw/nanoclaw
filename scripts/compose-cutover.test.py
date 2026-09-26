@@ -53,13 +53,16 @@ class ComposeCutoverTests(unittest.TestCase):
             with self.assertRaisesRegex(CUTOVER.RECOVERY.RecoveryError, 'stage_link_unsafe'):
                 CUTOVER.valid_staged_members(stage)
 
-    def test_staged_tree_rejects_hardlinks_and_missing_files(self):
+    def test_staged_tree_accepts_internal_hardlinks_only_and_rejects_missing_files(self):
         with tempfile.TemporaryDirectory() as temp:
             stage = staged_fixture(Path(temp))
-            os.link(stage / 'env', stage / 'duplicate-env')
+            os.link(stage / 'state/data/v2.db', stage / 'state/data/v2-copy.db')
+            CUTOVER.valid_staged_members(stage)  # every name of that file is inside the stage
+            outside = Path(temp) / 'outside-name'
+            os.link(stage / 'env', outside)
             with self.assertRaisesRegex(CUTOVER.RECOVERY.RecoveryError, 'stage_hardlink_unsafe'):
                 CUTOVER.valid_staged_members(stage)
-            (stage / 'duplicate-env').unlink()
+            outside.unlink()
             (stage / 'env').unlink()
             with self.assertRaisesRegex(CUTOVER.RECOVERY.RecoveryError, 'stage_members_invalid'):
                 CUTOVER.valid_staged_members(stage)

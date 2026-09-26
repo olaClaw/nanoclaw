@@ -100,16 +100,23 @@ class ComposeRecoveryTests(unittest.TestCase):
         self.assertEqual(restart[-2:], ('nanoclaw', 'postgres'))
         self.assertNotIn('nextcloud-calendar', restart)
 
-    def test_source_hardlink_fails_instead_of_silently_disappearing(self):
+    def test_hardlink_to_earlier_file_under_same_member_is_accepted(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             state = root / 'state'
-            state.mkdir()
-            (state / 'first').write_text('fixture')
-            os.link(state / 'first', state / 'second')
-            with self.assertRaisesRegex(RECOVERY.RecoveryError, 'source_hardlink_unsupported'):
-                RECOVERY.archive_sources(root / 'archive.tar', state, state / 'first',
-                                         state, {name: state / 'first' for name in RECOVERY.PRIVATE_INPUTS.values()})
+            (state / 'data').mkdir(parents=True)
+            (state / 'data/first').write_text('fixture')
+            os.link(state / 'data/first', state / 'data/second')
+            with tarfile.open(root / 'links.tar', 'w:') as stream:
+                stream.add(state, arcname='state')
+            with tarfile.open(root / 'links.tar', 'r:') as stream:
+                member = stream.getmember('state/data/second')
+                kinds = {'state/data/first': 'file'}
+                self.assertTrue(member.islnk())
+                self.assertTrue(RECOVERY.hardlink_target_ok(member, kinds))
+                self.assertFalse(RECOVERY.hardlink_target_ok(member, {}))
+                member.linkname = 'env'
+                self.assertFalse(RECOVERY.hardlink_target_ok(member, {'env': 'file'}))
 
     def test_private_roots_reject_world_access(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -126,6 +133,8 @@ class ComposeRecoveryTests(unittest.TestCase):
             (state / 'release.json').write_text(json.dumps({'revision': 'a' * 40}))
             (state / 'data/upgrade-state.json').write_text(json.dumps({'commit': 'a' * 40}))
             (state / 'data/container-skill').symlink_to('/app/skills/example')
+            (state / 'data/pkg-a').write_text('shared package file')
+            os.link(state / 'data/pkg-a', state / 'data/pkg-b')
             with sqlite3.connect(state / 'data/v2.db') as db:
                 db.execute('CREATE TABLE example (id INTEGER)')
             env = root / 'env-source'
@@ -183,6 +192,9 @@ class ComposeRecoveryTests(unittest.TestCase):
             self.assertEqual(os.readlink(root / 'staged/state/data/container-skill'),
                              '/app/skills/example')
             self.assertEqual((root / 'staged').stat().st_mode & 0o077, 0)
+            staged_a, staged_b = root / 'staged/state/data/pkg-a', root / 'staged/state/data/pkg-b'
+            self.assertEqual(staged_a.stat().st_ino, staged_b.stat().st_ino)
+            self.assertEqual(staged_b.read_text(), 'shared package file')
             payload['revision'] = 'b' * 40
             (backup / 'manifest.json').write_text(json.dumps(payload))
             with self.assertRaisesRegex(RECOVERY.RecoveryError, 'backup_authentication_failed'):

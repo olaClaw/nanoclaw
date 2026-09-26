@@ -27,6 +27,9 @@ broker unit and OneCLI; dumps PostgreSQL while it is still running; archives
 `data/`, `groups/`, `.env`, the Signal state, `~/.config/nanoclaw`, the mail
 broker config and OneCLI `/app/data`; restarts everything; and only then
 encrypts the archive and dump. The pause lasts as long as the archive takes.
+Hard links inside the archived state (for example package installs in a
+group workspace) are kept; if the snapshot fails, its partial folder and key
+are removed.
 
 If it prints `original_install=restart_failed_manual_check_needed`, check the
 old install first. The key is written to the separate key directory: copy it

@@ -208,11 +208,10 @@ def preflight(ctx):
 
 
 def archive_filter(item):
-    # Sockets, FIFOs and devices are recreated by the services; hard links are
-    # not expected in install state and would complicate safe extraction.
-    if item.islnk():
-        fail('source_hardlink_unsupported')
-    return item if item.isfile() or item.isdir() or item.issym() else None
+    # Sockets, FIFOs and devices are recreated by the services. Hard links
+    # (e.g. package-manager installs in a group workspace) are kept: tarfile
+    # stores one only when its inode is already in this archive.
+    return item if item.isfile() or item.isdir() or item.issym() or item.islnk() else None
 
 
 def write_archive(path, ctx, live):
@@ -239,12 +238,29 @@ def wait_until(predicate, timeout=120):
 
 
 def snapshot(ctx, live):
+    """Run the snapshot; on any failure remove the partial folder and its key (no plaintext left behind)."""
+    created = []
+    try:
+        _snapshot(ctx, live, created)
+    except BaseException:
+        for path in created:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+        print('partial_snapshot=removed', flush=True)
+        raise
+
+
+def _snapshot(ctx, live, created):
     project, user = ctx['project'], ctx['user']
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     identifier = f'legacy-{live["head"][:8]}-{stamp}-{secrets.token_hex(3)}'
     folder = ctx['output_root'] / identifier
     key = ctx['key_root'] / f'{identifier}.key'
     folder.mkdir(mode=0o700)
+    created.append(folder)
+    created.append(key)
     with key.open('x') as stream:
         stream.write(secrets.token_hex(32) + '\n')
     os.chmod(key, 0o600)

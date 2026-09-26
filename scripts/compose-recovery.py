@@ -189,6 +189,14 @@ def resume_profile_services(project, services):
             '--no-build', '--pull', 'never', *services)
 
 
+def hardlink_target_ok(item, kinds):
+    """A hard link may only point at a regular file already in the archive, under the same top-level member."""
+    target, name = PurePosixPath(item.linkname), PurePosixPath(item.name)
+    return (bool(target.parts) and not target.is_absolute() and '..' not in target.parts and
+            str(target) == item.linkname and kinds.get(item.linkname) == 'file' and
+            target.parts[0] == name.parts[0])
+
+
 def checked_members(archive):
     found = set()
     kinds = {}
@@ -210,6 +218,10 @@ def checked_members(archive):
                     fail('archive_member_unsafe')
                 links.add(str(path))
                 kinds[str(path)] = 'link'
+            elif item.islnk():
+                if not hardlink_target_ok(item, kinds):
+                    fail('archive_member_unsafe')
+                kinds[str(path)] = 'hardlink'
             elif item.isfile():
                 kinds[str(path)] = 'file'
             elif item.isdir():
@@ -233,9 +245,9 @@ def archive_sources(archive, state, env_file, onecli_data, extras):
                *[(name, extras[name]) for name in PRIVATE_INPUTS.values()]]
 
     def archive_filter(item):
-        if item.islnk():
-            fail('source_hardlink_unsupported')
-        return item if item.isfile() or item.isdir() or item.issym() else None
+        # tarfile stores a hard link only when its inode was already added to
+        # this archive; checked_members then verifies the target.
+        return item if item.isfile() or item.isdir() or item.issym() or item.islnk() else None
 
     with tarfile.open(archive, 'w:', format=tarfile.PAX_FORMAT) as stream:
         for name, path in sources:
