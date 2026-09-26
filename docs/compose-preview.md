@@ -3,10 +3,10 @@
 `compose.yaml` describes NanoClaw, PostgreSQL, OneCLI, Signal, two read-only
 brokers and a TCP-only egress proxy. They are behind the `core-preview` profile so a plain
 `docker compose up` does not start a partial stack. The profile has been exercised
-locally with synthetic state through Podman's Docker-compatible API, but has
-not been deployed on the target Docker host or tested with real channel,
-calendar or model credentials. The administrative panel still needs Compose
-integration.
+locally with synthetic state through Podman's Docker-compatible API and on a
+dedicated Docker LXC with synthetic identities and a local model endpoint.
+Real channel and calendar identities have not been migrated. The
+administrative panel still needs Compose integration.
 
 The image runs from `/srv/nanoclaw`, matching the absolute path on the Docker
 daemon host. This matters because NanoClaw asks that daemon to bind-mount
@@ -47,8 +47,10 @@ detects a running CLI listener, but does not establish that the gateway,
 channels or model endpoint are healthy. The profile includes service-level
 health checks, network isolation and a bootstrap that records the installed
 release before the host can start. These checks passed in the synthetic Podman
-rehearsal described below; full recovery and a target-Docker rehearsal remain
-open. Do not run the preview profile on the installation.
+rehearsal described below and on the dedicated Docker LXC. An encrypted
+backup, restore onto fresh volumes and automatic rollback were exercised
+there with synthetic state. Do not run the preview profile on a production
+installation without a separately reviewed cutover.
 
 The `agent-egress` network has the fixed name `nanoclaw-egress` and is internal.
 Compose creates it before NanoClaw starts. Agents can resolve the two brokers
@@ -169,14 +171,10 @@ The Compose password-file wrapper was also exercised on that restored state,
 with `tini` verified as PID 1. All test containers, volumes, network and
 temporary files were removed afterward.
 
-For the future backup procedure, quiesce NanoClaw and OneCLI, keep PostgreSQL
-running long enough to take a custom-format database dump, and copy the entire
-OneCLI `/app/data` volume in the same maintenance window. Preserve the
-encryption key with mode `0600` inside a private backup directory. Include
-NanoClaw's `data`, `groups`, `store`, configuration, templates, Signal state,
-private secrets and the release manifest in the same recovery set. Restore
-into fresh volumes and directories, verify ownership and permissions, start
-PostgreSQL and OneCLI at the recorded image digests, then verify an existing
-agent through the SDK before starting NanoClaw or Signal. This sequence is a
-design backed by the isolated OneCLI test; the complete stack's backup and
-restore still need an end-to-end rehearsal with test identities.
+For the operator-run encrypted backup, offline verification and extraction
+procedure, see [compose-recovery.md](compose-recovery.md). The dedicated LXC
+rehearsal restored the complete synthetic stack onto fresh volumes and then
+rolled back automatically with successful agent prompts on both sides. The
+backup tool deliberately stops at offline staging; the separate
+`compose-rehearsal.py` performs a synthetic-only restore and rollback. A
+production cutover and real channel migration still need their own review.
