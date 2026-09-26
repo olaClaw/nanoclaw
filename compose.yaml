@@ -213,7 +213,10 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
-    networks: [gateway, agent-egress]
+    networks:
+      gateway: {}
+      agent-egress:
+        aliases: [host.docker.internal]
 
   infomaniak-mail:
     profiles: [core-preview]

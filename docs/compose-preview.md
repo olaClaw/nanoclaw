@@ -86,6 +86,7 @@ the gateway on port 10255. PostgreSQL only joins
 the internal `db` network; OneCLI joins `db` and `gateway`. The NanoClaw host
 joins `gateway` and forces its agent sessions onto a separate internal egress
 network. The `onecli-egress` proxy joins that agent network through Compose
+as `host.docker.internal`, the hostname configured for the agent's HTTP proxy,
 and forwards TCP to OneCLI's gateway port; the agent cannot reach
 OneCLI's dashboard through that proxy. The OneCLI dashboard is bound only to
 the server's loopback address for this preview. No Postgres or gateway port is
