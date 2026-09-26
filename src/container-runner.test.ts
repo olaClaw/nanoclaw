@@ -17,6 +17,7 @@ import type { ContainerConfig } from './container-config.js';
 import {
   armSessionLifecycle,
   composeSessionSpec,
+  derivedImageNeedsRebuild,
   parseMemoryMb,
   parsePidsLimit,
   resolveProviderName,
@@ -563,5 +564,49 @@ describe('syncSkillSymlinks', () => {
       expect.stringContaining('Shared skill not symlinked'),
       expect.objectContaining({ skill: 'welcome' }),
     );
+  });
+});
+
+describe('derivedImageNeedsRebuild', () => {
+  const base = 'sha256:base-current';
+  const derivedConfig: ContainerConfig = {
+    ...containerConfig,
+    imageTag: 'nanoclaw-agent-v2-test:group-1',
+    packages: { apt: ['ffmpeg'], npm: [] },
+  };
+  const derivedLabels = (from: string) => ({
+    'dev.nanoclaw.image-source': 'derived',
+    'dev.nanoclaw.derived-from': from,
+  });
+
+  it('rebuilds a derived image built on a previous base', () => {
+    expect(derivedImageNeedsRebuild(derivedConfig, { baseId: base, labels: derivedLabels('sha256:base-old') })).toBe(
+      true,
+    );
+  });
+
+  it('keeps a derived image built on the current base', () => {
+    expect(derivedImageNeedsRebuild(derivedConfig, { baseId: base, labels: derivedLabels(base) })).toBe(false);
+  });
+
+  it('rebuilds a missing image when the group still declares packages', () => {
+    expect(derivedImageNeedsRebuild(derivedConfig, { baseId: base, labels: null })).toBe(true);
+  });
+
+  it('never replaces an image this host did not derive', () => {
+    expect(derivedImageNeedsRebuild(derivedConfig, { baseId: base, labels: { 'org.example': 'custom' } })).toBe(false);
+  });
+
+  it('does nothing without an image tag, a base, or packages to layer', () => {
+    expect(derivedImageNeedsRebuild({ ...derivedConfig, imageTag: undefined }, { baseId: base, labels: null })).toBe(
+      false,
+    );
+    expect(derivedImageNeedsRebuild(derivedConfig, { baseId: null, labels: null })).toBe(false);
+    expect(
+      derivedImageNeedsRebuild(
+        { ...derivedConfig, packages: { apt: [], npm: [] } },
+        { baseId: base, labels: derivedLabels('sha256:base-old') },
+      ),
+    ).toBe(false);
   });
 });

@@ -25,7 +25,7 @@ import {
   TIMEZONE,
   agentAssetsInImage,
 } from './config.js';
-import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
+import { CONTAINER_PLUGINS_DIR, materializeContainerJson, type ContainerConfig } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
@@ -378,7 +378,14 @@ async function spawnContainer(session: Session): Promise<void> {
   // Materialize container.json from DB — writes fresh file and returns
   // the config object, threaded through provider resolution, buildMounts,
   // and buildContainerArgs so we don't re-read.
-  const containerConfig = await materializeContainerJson(agentGroup.id);
+  let containerConfig = await materializeContainerJson(agentGroup.id);
+  // A per-group image is layered on the base agent image. After a release
+  // update, or an import from another install, it can be missing or built on
+  // a stale base (which a Compose host refuses on revision). Rebuild it from
+  // the current base before composing the spec.
+  if (await ensureAgentGroupImageCurrent(agentGroup.id, containerConfig)) {
+    containerConfig = await materializeContainerJson(agentGroup.id);
+  }
 
   const providerName = resolveProviderName(session.agent_provider, containerConfig.provider);
   await initGroupFilesystem(agentGroup, { provider: providerName });
@@ -1437,6 +1444,67 @@ function selectedSkillNames(containerConfig: import('./container-config.js').Con
 }
 
 const execAsync = promisify(exec);
+
+export interface DerivedImageState {
+  /** Image id of the current base agent image, or null when it cannot be inspected. */
+  baseId: string | null;
+  /** Labels of the group's image, or null when that image does not exist. */
+  labels: Record<string, string> | null;
+}
+
+/**
+ * Whether a group's per-group image must be rebuilt before spawn. Only images
+ * this host derives (`dev.nanoclaw.image-source=derived`) are rebuilt; an
+ * operator-set image is never replaced, and nothing is rebuilt unless the
+ * group still declares packages to layer.
+ */
+export function derivedImageNeedsRebuild(config: ContainerConfig, state: DerivedImageState): boolean {
+  const hasPackages = config.packages.apt.length > 0 || config.packages.npm.length > 0;
+  if (!config.imageTag || !state.baseId || !hasPackages) return false;
+  if (!state.labels) return true;
+  if (state.labels['dev.nanoclaw.image-source'] !== 'derived') return false;
+  return state.labels['dev.nanoclaw.derived-from'] !== state.baseId;
+}
+
+async function inspectImage(ref: string, format: string): Promise<string | null> {
+  try {
+    const { stdout } = await execAsync(`${CONTAINER_RUNTIME_BIN} image inspect --format '${format}' ${ref}`);
+    return stdout.trim();
+  } catch {
+    return null;
+  }
+}
+
+const derivedImageRefreshes = new Map<string, Promise<boolean>>();
+
+/**
+ * Rebuild the group's derived image when it is missing or stale. Returns true
+ * when a rebuild ran, so the caller re-reads the (possibly retagged) config.
+ * Concurrent spawns for one group share a single rebuild.
+ */
+export async function ensureAgentGroupImageCurrent(agentGroupId: string, config: ContainerConfig): Promise<boolean> {
+  if (!config.imageTag || !getSessionDriver().capabilities().imageBuild) return false;
+  const running = derivedImageRefreshes.get(agentGroupId);
+  if (running) return running;
+  const refresh = (async () => {
+    const baseId = await inspectImage(CONTAINER_IMAGE, '{{.Id}}');
+    const rawLabels = await inspectImage(config.imageTag!, '{{json .Config.Labels}}');
+    const labels = rawLabels === null ? null : ((JSON.parse(rawLabels) as Record<string, string> | null) ?? {});
+    if (!derivedImageNeedsRebuild(config, { baseId, labels })) return false;
+    log.info('Rebuilding per-agent-group image on current base', {
+      agentGroupId,
+      reason: labels ? 'stale-base' : 'missing',
+    });
+    await buildAgentGroupImage(agentGroupId);
+    return true;
+  })();
+  derivedImageRefreshes.set(agentGroupId, refresh);
+  try {
+    return await refresh;
+  } finally {
+    derivedImageRefreshes.delete(agentGroupId);
+  }
+}
 
 /** Build a per-agent-group Docker image with custom packages. */
 export async function buildAgentGroupImage(agentGroupId: string): Promise<void> {
