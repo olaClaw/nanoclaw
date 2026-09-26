@@ -143,14 +143,14 @@ The command deliberately retains transaction data, recovered state and new
 volumes for inspection; these contain sensitive plaintext. Rollback failure
 prints `original_rollback=failed_manual_recovery_needed` and requires manual
 recovery, not an automatic retry. This script is **not a production migration
-or update command**. It passed a full backup, restore and automatic rollback
-on the isolated Docker LXC with synthetic state, including `READY` prompts on
-the restored copy and the original. The first runs exposed lost UID/GID during
-archive extraction; the corrected staging preserves numeric owners and safe
-modes, and the final rehearsal passed before the later mode-bit hardening.
-Do not run it with real channel identities,
-credentials or workloads. A root-only LXC `--preflight` and separate review are
-required before its first `--apply` run; no production use is authorized.
+or update command**. On the isolated Docker LXC, the latest rehearsal verified
+an authenticated synthetic backup, staged it with numeric ownership and safe
+modes, restored onto fresh volumes, and rolled back automatically with `READY`
+prompts on both sides. The selective service restart after creating a backup
+is covered by local tests; this rehearsal used an existing backup. Do not run
+it with real channel identities, credentials or workloads. A root-only LXC
+`--preflight` and separate review are required before its first `--apply` run;
+no production use is authorized.
 
 If restore fails after stopping the original, the script prints a fixed
 `restore_failed_phase` label and only the Compose service state/health enums
