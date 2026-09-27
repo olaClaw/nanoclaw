@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for NanoClaw update candidates
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

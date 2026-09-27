@@ -50,7 +50,7 @@ export const INDEX_HTML = `<!doctype html>
           <button type="button" data-view="backups">Backup</button>
           <button type="button" data-view="updates">Aggiornamenti</button>
         </nav>
-        <p class="aside-note">Dal pannello puoi creare backup e riavviare gli agenti; le altre operazioni arriveranno nelle prossime versioni.</p>
+        <p class="aside-note">Dal pannello puoi creare backup, installare aggiornamenti e riavviare gli agenti.</p>
       </aside>
       <main>
         <header>
@@ -158,6 +158,7 @@ export const APP_JS = String.raw`'use strict';
     rate_limited: 'Troppe richieste: attendi un minuto.',
     upstream_unavailable: 'Il servizio NanoClaw non risponde.',
     restart_in_progress: 'Un riavvio di questo agente è già in corso.',
+    candidate_unknown: 'Questa release non è più tra le candidate: aggiorna la pagina.',
     operation_in_progress: 'Un backup o un aggiornamento è già in corso.',
     key_not_on_host: 'La chiave non è più sul server.',
     reauth_required: 'Serve di nuovo la password.',
@@ -375,7 +376,8 @@ export const APP_JS = String.raw`'use strict';
     const cards = [
       card('Installata', el('div', { class: 'metric' }, r.installed.version), el('p', { class: 'muted' }, 'Revisione ' + r.installed.revision.slice(0, 8))),
       card('Candidata', r.candidate
-        ? [el('div', { class: 'metric' }, r.candidate.version), el('p', { class: 'muted' }, 'Revisione ' + r.candidate.revision.slice(0, 8))]
+        ? [el('div', { class: 'metric' }, r.candidate.version), el('p', { class: 'muted' }, 'Revisione ' + r.candidate.revision.slice(0, 8)),
+          el('div', { class: 'actions' }, el('button', { class: 'primary', type: 'button', onclick: () => confirmUpdate(view, r.candidate) }, 'Installa'))]
         : el('p', { class: 'muted' }, 'Nessuna release candidata.')),
     ];
     const u = r.last_update;
@@ -391,7 +393,7 @@ export const APP_JS = String.raw`'use strict';
       ]), u.phases.length ? el('p', { class: 'muted' }, 'Fasi: ' + u.phases.map((p) => PHASES[p.phase] || p.phase).join(' → ')) : null)
       : wide('Ultimo aggiornamento', el('p', { class: 'muted' }, 'Nessun aggiornamento registrato.'));
     view.append(el('div', { class: 'grid' }, cards, last,
-      wide(null, el('p', { class: 'muted' }, 'L\'avvio di un aggiornamento dal pannello arriverà in una prossima versione; oggi si avvia da terminale.'))));
+      wide(null, el('p', { class: 'muted' }, 'Le nuove release compaiono qui da sole entro un\'ora dalla pubblicazione. Da terminale l\'aggiornamento resta disponibile come sempre.'))));
   }
 
   // Dangerous operations need the password again (reauth window on the server).
@@ -479,6 +481,44 @@ export const APP_JS = String.raw`'use strict';
     }
     if (result.status !== 202 && result.status !== 200) { say(ERRORS[result.code] || 'Backup non avviato.', true); return; }
     await followJob(target, result.data.job.id);
+  }
+
+  const UPDATE_PHASES = { pull: 'download delle immagini', backup: 'backup cifrato', update: 'aggiornamento', done: 'fine' };
+
+  function confirmUpdate(view, candidate) {
+    const box = el('article', { class: 'card wide key-card' },
+      el('h2', {}, 'Installare la release ' + candidate.version + ' (' + candidate.revision.slice(0, 8) + ')?'),
+      el('p', {}, 'Prima dell\'aggiornamento viene fatto un backup cifrato. Per qualche minuto i canali si fermano; se qualcosa non va, la release attuale viene ripristinata da sola.'),
+      el('p', {}, 'Anche questo pannello si riavvia: dovrai accedere di nuovo. L\'esito resta in Aggiornamenti e la chiave del backup in Backup.'),
+      el('div', { class: 'actions' },
+        el('button', { class: 'primary', type: 'button', onclick: () => { box.remove(); startUpdate(view, candidate); } }, 'Installa'),
+        el('button', { class: 'secondary', type: 'button', onclick: () => box.remove() }, 'Annulla')));
+    view.prepend(box);
+  }
+
+  async function startUpdate(view, candidate) {
+    const result = await api('POST', '/updates', { release_revision: candidate.revision, confirm: true });
+    if (result.status === 403 && result.code === 'reauth_required') {
+      askPassword(view, 'Per installare la release inserisci di nuovo la password.', () => startUpdate(view, candidate));
+      return;
+    }
+    if (result.status !== 202 && result.status !== 200) { say(ERRORS[result.code] || 'Aggiornamento non avviato.', true); return; }
+    const progress = el('article', { class: 'card wide' }, el('h2', {}, 'Aggiornamento in corso'), el('p', { class: 'muted' }, 'Avvio…'));
+    view.prepend(progress);
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      const job = await api('GET', '/jobs/' + encodeURIComponent(result.data.job.id));
+      if (job.status === 401) return;
+      if (job.status !== 200) continue; // the panel may be restarting
+      const j = job.data;
+      progress.lastChild.textContent = 'Fase: ' + (UPDATE_PHASES[j.phase] || j.phase);
+      if (j.outcome === 'running') continue;
+      progress.remove();
+      await render('updates');
+      say(j.outcome === 'succeeded' ? 'Release installata.' : 'Aggiornamento non riuscito: ' + (OUTCOMES[j.outcome] || [j.outcome])[0].toLowerCase() + '.', j.outcome !== 'succeeded');
+      if (j.backup) await revealKey($('view'), j.backup);
+      return;
+    }
   }
 
   async function renderBackups(view, cursor) {

@@ -222,21 +222,36 @@ backup --apply` under the release-update lock, so a backup and an update never
 overlap, whichever side starts them. After a backup the panel shows its key
 once; when the operator confirms it is saved in a password manager, the
 service shreds it from the server. Backups whose key is still on the server
-are flagged in the list. The service answers on a Unix socket in
+are flagged in the list. Release updates work the same way. Every published release attaches its
+digest-pinned manifest to a GitHub release `compose-<revision>`; the hourly
+`nanoclaw-ops-candidates` timer (the only operations unit with network access)
+fetches the newest ones, keeps those whose revision descends from the
+installed one, and fetches that revision into the checkout as its owner. The
+panel offers the newest as the candidate; installing it pulls the three fork
+images, takes a fresh encrypted backup under the release-update lock and runs
+`compose-release-update.py` in production mode, whose checks and automatic
+rollback apply unchanged. The dashboard restarts during the update; the
+result stays on the Updates screen and the backup's key on the Backups
+screen. The service answers on a Unix socket in
 `/var/lib/nanoclaw-ops/sock/` that only the dashboard's group (61001) can
 open; the dashboard mounts that directory read-only. Without it the screens
 say the service is not active and the CLI tools keep working as before.
 
-1. Copy `scripts/compose-ops.py` and `scripts/compose-recovery.py` from a
-   reviewed checkout to `/usr/local/lib/nanoclaw/` (root-owned, `0644`) and
-   check their SHA-256 against that checkout.
+1. Copy `scripts/compose-ops.py`, `scripts/compose-recovery.py` and
+   `scripts/compose-release-update.py` from a reviewed checkout to
+   `/usr/local/lib/nanoclaw/` (root-owned, `0644`) and check their SHA-256
+   against that checkout.
 2. `install -d -m 750 -o root -g 61001 /var/lib/nanoclaw-ops/sock` and
    `install -d -m 700 /var/lib/nanoclaw-ops/candidates /var/lib/nanoclaw-ops/jobs`.
    Link `/var/lib/nanoclaw-ops/{project,backups,keys,release-backups}` to the
    Compose checkout, the backup root, the key root and the release-update
    control root.
-3. Install `deploy/ops/nanoclaw-ops.service` in `/etc/systemd/system/`, then
-   `systemctl daemon-reload && systemctl enable --now nanoclaw-ops`.
+3. Install `deploy/ops/nanoclaw-ops.service`,
+   `deploy/ops/nanoclaw-ops-candidates.service` and
+   `deploy/ops/nanoclaw-ops-candidates.timer` in `/etc/systemd/system/`. On a
+   test host with synthetic identities put `NANOCLAW_OPS_UPDATE_MODE=synthetic`
+   in `/etc/default/nanoclaw-ops` (the default is `production`). Then
+   `systemctl daemon-reload && systemctl enable --now nanoclaw-ops nanoclaw-ops-candidates.timer`.
 4. Recreate the `dashboard` service so it sees the socket.
 
 ### HTTPS proxy

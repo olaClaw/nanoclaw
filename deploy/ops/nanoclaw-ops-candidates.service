@@ -1,0 +1,25 @@
+# Fetches release manifests published as GitHub releases and keeps those that
+# descend from the installed release as update candidates for the dashboard.
+# The only operations unit with network access; it changes nothing but the
+# candidates directory and the checkout's fetched objects (as its owner).
+[Unit]
+Description=NanoClaw update candidates
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/nanoclaw/compose-ops.py fetch-candidates \
+  --repo olaClaw/nanoclaw \
+  --candidates /var/lib/nanoclaw-ops/candidates \
+  --state-root /srv/nanoclaw \
+  --project-root /var/lib/nanoclaw-ops/project
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
