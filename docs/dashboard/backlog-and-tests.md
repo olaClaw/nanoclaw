@@ -99,8 +99,9 @@ while import/export is missing.
   server console/log; a web setup page creates the administrator only with
   that code, which expires on use or after a few minutes. The console command
   stays the recovery path.
-- **Guided HTTPS setup for new installs** (requested by the operator on
-  2026-09-27): a local console script that asks for the panel hostname, the
+- **Guided HTTPS setup for new installs** (done 2026-09-27 as
+  `scripts/compose-https-setup.py`; the Let's Encrypt path still needs its
+  first live run on a new install; requested by the operator on 2026-09-27): a local console script that asks for the panel hostname, the
   DNS provider and its token (hidden input, never echoed, logged or passed as
   arguments) and configures the proxy through its API: initial administrator
   with a random password shown once, DNS-01 certificate, proxy host to
@@ -115,6 +116,7 @@ while import/export is missing.
   1. *Preferred*: HTTPS with a certificate generated locally (self-signed or
      a small local CA the operator installs on their devices). Traffic stays
      encrypted; the browser warns once. No design change in the service.
+     Done: `compose-https-setup.py` mode `local`.
   2. *Plain HTTP*: `NANOCLAW_DASHBOARD_INSECURE_HTTP=true` plus an `http://`
      origin. The service then uses a cookie without the `__Host-` prefix and
      `Secure` flag (browsers refuse secure cookies over HTTP), sends no HSTS,

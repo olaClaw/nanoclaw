@@ -62,6 +62,7 @@ jobs:
           python3 scripts/ci-docker-build.test.py
           python3 scripts/compose-rehearsal.test.py
           python3 scripts/compose-ops.test.py
+          python3 scripts/compose-https-setup.test.py
 
   test:
     runs-on: ubuntu-latest
