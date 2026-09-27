@@ -122,7 +122,9 @@ services:
     init: true
     restart: unless-stopped
     read_only: true
-    user: '1001:1001'
+    # Outside the range adduser gives to people (1000-59999), so on no host
+    # does the dashboard's state belong to a real account.
+    user: '61001:61001'
     # Group of the host process, which owns the socket directory (0750) and socket (0660).
     group_add: ['1000']
     cap_drop: [ALL]
