@@ -15,6 +15,8 @@ Companion documents in this directory:
   allowlists, backup/export/import flow.
 - [backlog-and-tests.md](backlog-and-tests.md) — epics D0–D9, threat model,
   test matrix, milestones.
+- [threat-model.md](threat-model.md) — assets, actors, boundaries, threats
+  T1–T20 with their controls and tests.
 - [prototype/index.html](prototype/index.html) — static UI prototype with
   placeholder values only; not wired to any API.
 
@@ -23,27 +25,23 @@ Companion documents in this directory:
 - The legacy-to-Compose migration is complete and production runs on the
   Compose stack. This document is not a health report; check the operational
   state before any production-facing step.
-- `scripts/compose-release-update.py` supports a production mode (release
-  manifest, fresh verified backup, schema-change stop, derived-image refresh,
-  health gate and automatic rollback). The fix for the derived-image rebuild
-  race is merged.
-- Missing for the dashboard: the update job has a lock but no persistent,
-  machine-readable job state. That is the next controller change (see
-  **Next step**), and it is what the web update button will read.
-- Dashboard work is at specification/prototype stage. No dashboard service,
-  API or authentication exists.
+- `scripts/compose-release-update.py` supports a production mode and records a
+  persistent job state (`--status`, interrupted-run guard) that the dashboard
+  update screen will read.
+- **D0 done:** the API contract lives in `src/dashboard/contract/` (strict
+  schemas, endpoint list, authorization matrix, HMAC public IDs, one example
+  per endpoint) with synthetic fixtures and canaries in
+  `src/dashboard/fixtures/`, and the threat model in
+  [threat-model.md](threat-model.md). No dashboard service, host boundary or
+  authentication exists yet.
 
 ## Next step
 
-1. Add a persistent job-state file to `compose-release-update.py` (job ID,
-   mode, target release, current phase, outcome, failure category,
-   timestamps; redacted values only; atomic writes; shared with the existing
-   lock) plus a read-only `status` command, with tests. The CLI and the future
-   dashboard read the same file.
-2. Then start D0/D1/D2 on a dedicated branch: typed API schemas, the narrow
-   host boundary and password login, with a read-only overview over synthetic
-   fixtures. Compose, backup/import/update controllers and production state
-   stay unchanged in that slice.
+D1 and D2 on a dedicated branch: the narrow host-side boundary (named
+operations, request and response validation against the contract, projections
+over the synthetic install with canary tests) and the password login/session
+layer. Decide there how the dashboard service reaches the host boundary
+(socket or internal network) without mounting Docker, `ncl.sock` or the DB.
 
 ## Agreed product behavior
 
@@ -190,3 +188,4 @@ repository README.
 | 2026-09-27 | Consolidated dashboard decisions and implementation boundary in the new fork; no runtime, server, image or credential changed. | Complete post-migration checks, then begin the read-only security vertical slice on a separate branch. |
 | 2026-09-27 | Added a public, release-verified installation/configuration guide as a whole-stack deliverable, including tested legacy-to-Compose and Compose-to-Compose migration procedures; no guide commands or runtime behavior changed. | Write and rehearse each supported guide path when the dashboard and installation flow stabilize. |
 | 2026-09-27 | Moved the dashboard plan, design, API contract, backlog/tests and static prototype into `docs/dashboard/`; owner is now Claude Code. No runtime, server, image or credential changed. | Persistent job state for the release-update controller, then D0–D2. |
+| 2026-09-27 | D0: contract in `src/dashboard/contract/` (dependency-free strict schema language, 25 endpoints with request/response schemas, authorization matrix, HMAC public IDs, examples), synthetic install and canaries in `src/dashboard/fixtures/`, threat model T1–T20. 25 contract tests. No runtime change. | D1/D2: host boundary and login. |
