@@ -96,7 +96,31 @@ while import/export is missing.
   server console/log; a web setup page creates the administrator only with
   that code, which expires on use or after a few minutes. The console command
   stays the recovery path.
-- **Release updates recreate the dashboard services**: `compose-release-update.py`
-  recreates only the core services, so `dashboard` keeps the previous host
-  image until recreated. Recreate `dashboard` (and check `proxy`) when the
-  profile is enabled, including in the rollback.
+- **Guided HTTPS setup for new installs** (requested by the operator on
+  2026-09-27): a local console script that asks for the panel hostname, the
+  DNS provider and its token (hidden input, never echoed, logged or passed as
+  arguments) and configures the proxy through its API: initial administrator
+  with a random password shown once, DNS-01 certificate, proxy host to
+  `dashboard:8080` with Force SSL, HTTP/2 and HSTS. The proxy admin UI never
+  needs to be opened or tunnelled. Rehearsed by hand through the API on the
+  test LXC (self-signed certificate); needs the real DNS-01 path, idempotent
+  reruns and a dry-run mode. Goes with the installation guide and the
+  first-password setup code.
+- **Panel without a domain** (requested by the operator on 2026-09-27): let an
+  install without a domain use the panel, flagged as potentially dangerous.
+  Two options, both explicit opt-ins:
+  1. *Preferred*: HTTPS with a certificate generated locally (self-signed or
+     a small local CA the operator installs on their devices). Traffic stays
+     encrypted; the browser warns once. No design change in the service.
+  2. *Plain HTTP*: `NANOCLAW_DASHBOARD_INSECURE_HTTP=true` plus an `http://`
+     origin. The service then uses a cookie without the `__Host-` prefix and
+     `Secure` flag (browsers refuse secure cookies over HTTP), sends no HSTS,
+     logs a warning at every start, and the UI shows a permanent red banner
+     ("connessione non cifrata: password e dati viaggiano in chiaro sulla
+     rete"). Still LAN/VPN only, never `0.0.0.0`; the guided setup must ask
+     for an explicit confirmation. Tests must prove that without the flag an
+     `http://` origin is refused, as today.
+- **Release updates recreate the dashboard** (done): `compose-release-update.py`
+  recreates `dashboard` on the new host image when the profile is in use, and
+  on the old one during a rollback. `proxy` image bumps still need a manual
+  pull and recreate.
