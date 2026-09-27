@@ -57,7 +57,9 @@ Compose creates it before NanoClaw starts. Agents can resolve the two brokers
 there as `infomaniak-mail:18765` and `nextcloud-calendar:18766`. Broker
 containers also join `broker-outbound` to reach IMAP and HTTPS CalDAV; neither
 MCP port is published on the server. Agent MCP registrations must use those
-service names instead of the previous Docker bridge address. Each broker
+service names instead of the previous Docker bridge address. They are plain
+HTTP on the internal network, so the host lists them in
+`NANOCLAW_MCP_PLAIN_HTTP_HOSTS`; MCP URLs to any other host still need HTTPS. Each broker
 requires a bearer capability in the agent group's MCP headers; the capabilities
 and upstream passwords stay in private runtime files and must never enter Git.
 

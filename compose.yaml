@@ -35,6 +35,8 @@ services:
       NANOCLAW_GATEWAY_PROVIDER: onecli
       NANOCLAW_EGRESS_LOCKDOWN: 'true'
       NANOCLAW_EGRESS_NETWORK: nanoclaw-egress
+      # The read-only brokers are reached over plain HTTP on the internal agent network.
+      NANOCLAW_MCP_PLAIN_HTTP_HOSTS: infomaniak-mail,nextcloud-calendar
       ONECLI_GATEWAY_CONTAINER: onecli-egress
       ONECLI_URL: http://onecli:10254
       SIGNAL_MANAGE_DAEMON: 'false'
