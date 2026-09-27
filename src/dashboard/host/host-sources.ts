@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { getActiveAdapters } from '../../channels/channel-registry.js';
+import { restartAgentGroupContainers } from '../../container-restart.js';
 import { DATA_DIR, DEFAULT_AGENT_PROVIDER, DEFAULT_MODEL } from '../../config.js';
 import { readEnvFile } from '../../env.js';
 import { getCodeIdentity } from '../../upgrade-state.js';
@@ -69,5 +70,6 @@ export function liveHostSources(idKey: Buffer): HostSources {
     release: releaseIdentity,
     defaults: { provider: DEFAULT_AGENT_PROVIDER, model: DEFAULT_MODEL, endpointConfigured: Boolean(endpoint) },
     now: () => new Date(),
+    restartAgent: (internalId) => restartAgentGroupContainers(internalId, 'restarted from the dashboard'),
   };
 }

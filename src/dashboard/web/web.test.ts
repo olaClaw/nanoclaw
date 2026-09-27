@@ -167,6 +167,7 @@ describe('dashboard server end to end over the host boundary', () => {
     release: () => ({ version: '2.4.0', revision: 'a'.repeat(40) }),
     defaults: { provider: 'opencode', model: 'fixture-model-a', endpointConfigured: true },
     now: () => new Date('2026-01-15T12:00:00Z'),
+    restartAgent: async () => 1,
   };
 
   async function start(forward?: Forward): Promise<void> {
@@ -359,8 +360,8 @@ describe('dashboard server end to end over the host boundary', () => {
       body: { confirm: true },
       headers: { ...base, 'x-csrf-token': csrf },
     });
-    expect(forwarded.status).toBe(501);
-    expect((forwarded.json() as { error: { code: string } }).error.code).toBe('not_implemented');
+    expect(forwarded.status).toBe(200);
+    expect((forwarded.json() as { restarted: number }).restarted).toBe(1);
   });
 
   it('asks for the password again before dangerous operations', async () => {

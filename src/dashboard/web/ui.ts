@@ -50,7 +50,7 @@ export const INDEX_HTML = `<!doctype html>
           <button type="button" data-view="backups">Backup</button>
           <button type="button" data-view="updates">Aggiornamenti</button>
         </nav>
-        <p class="aside-note">Dal pannello puoi creare backup; le altre operazioni arriveranno nelle prossime versioni.</p>
+        <p class="aside-note">Dal pannello puoi creare backup e riavviare gli agenti; le altre operazioni arriveranno nelle prossime versioni.</p>
       </aside>
       <main>
         <header>
@@ -157,6 +157,7 @@ export const APP_JS = String.raw`'use strict';
     not_implemented: 'Non ancora disponibile: arriverà con il servizio operativo.',
     rate_limited: 'Troppe richieste: attendi un minuto.',
     upstream_unavailable: 'Il servizio NanoClaw non risponde.',
+    restart_in_progress: 'Un riavvio di questo agente è già in corso.',
     operation_in_progress: 'Un backup o un aggiornamento è già in corso.',
     key_not_on_host: 'La chiave non è più sul server.',
     reauth_required: 'Serve di nuovo la password.',
@@ -281,7 +282,25 @@ export const APP_JS = String.raw`'use strict';
       ['Pacchetti', a.capabilities.packages],
       ['Server MCP', a.capabilities.mcp_servers],
       ['Mount aggiuntivi', a.capabilities.additional_mounts],
-    ])));
+    ]), el('div', { class: 'actions' },
+      el('button', { class: 'secondary', type: 'button', onclick: () => confirmRestart(target, a) }, 'Riavvia l\'agente'))));
+  }
+
+  function confirmRestart(target, agent) {
+    const box = el('article', { class: 'card wide key-card' },
+      el('h2', {}, 'Riavviare ' + agent.label + '?'),
+      el('p', {}, 'I container in esecuzione di questo agente si fermano. Quelli con messaggi in sospeso ripartono subito, gli altri al prossimo messaggio. Le conversazioni non si perdono.'),
+      el('div', { class: 'actions' },
+        el('button', { class: 'primary', type: 'button', onclick: async () => {
+          const result = await api('POST', '/agents/' + encodeURIComponent(agent.id) + '/restart', { confirm: true });
+          box.remove();
+          if (result.status !== 200) { say(ERRORS[result.code] || 'Riavvio non riuscito.', true); return; }
+          const n = result.data.restarted;
+          say(n === 0 ? 'Nessun container in esecuzione da riavviare.' : n === 1 ? '1 container riavviato.' : n + ' container riavviati.');
+          renderAgent(target, agent.id);
+        } }, 'Riavvia'),
+        el('button', { class: 'secondary', type: 'button', onclick: () => box.remove() }, 'Annulla')));
+    target.prepend(box);
   }
 
   async function renderChannels(view) {
