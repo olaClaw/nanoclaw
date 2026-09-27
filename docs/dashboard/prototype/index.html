@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>NanoClaw · Prototipo dashboard</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #18221c;
+        --muted: #52635a;
+        --line: #dce5de;
+        --surface: #fff;
+        --canvas: #f3f7f2;
+        --brand: #195d43;
+        --brand-dark: #124630;
+        --soft: #e7f2e9;
+        --warning: #7b4b00;
+        --warning-bg: #fff5dd;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; font: 16px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--canvas); }
+      button { font: inherit; cursor: pointer; }
+      button:focus-visible { outline: 3px solid #a8d6b8; outline-offset: 2px; }
+      .shell { min-height: 100vh; display: grid; grid-template-columns: 238px minmax(0, 1fr); }
+      aside { background: #10271c; color: #fff; padding: 30px 18px; }
+      .brand { font-size: 1.45rem; font-weight: 760; letter-spacing: -.04em; padding: 0 12px 28px; }
+      .brand small { display: block; color: #b5d2bd; font-size: .75rem; font-weight: 500; letter-spacing: .07em; text-transform: uppercase; }
+      nav { display: grid; gap: 5px; }
+      nav button { border: 0; border-radius: 10px; text-align: left; width: 100%; color: #d6e7da; background: transparent; padding: 11px 13px; }
+      nav button[aria-selected="true"] { background: #286b4c; color: #fff; font-weight: 700; }
+      .aside-note { margin: 34px 12px 0; color: #b5d2bd; font-size: .85rem; }
+      main { min-width: 0; max-width: 1420px; padding: 28px clamp(20px, 4vw, 52px) 70px; }
+      header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 26px; }
+      .eyebrow { margin: 0; color: var(--brand); font-size: .8rem; font-weight: 750; text-transform: uppercase; letter-spacing: .09em; }
+      h1 { margin: 3px 0 0; font-size: clamp(1.65rem, 3vw, 2.2rem); letter-spacing: -.045em; }
+      h2 { margin: 0 0 12px; font-size: 1.15rem; letter-spacing: -.02em; }
+      h3 { margin: 0 0 7px; font-size: 1rem; }
+      p { margin: 0 0 12px; }
+      .account { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: .9rem; }
+      .avatar { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; color: #fff; background: var(--brand); font-weight: 700; }
+      .banner { padding: 11px 14px; border: 1px solid #ead8a3; border-radius: 12px; background: var(--warning-bg); color: var(--warning); font-size: .91rem; margin-bottom: 24px; }
+      .intro { color: var(--muted); max-width: 64ch; margin-bottom: 24px; }
+      .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+      .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 20px; box-shadow: 0 8px 26px #12352208; }
+      .card.wide { grid-column: 1 / -1; }
+      .metric { font-size: 2rem; line-height: 1.1; font-weight: 760; letter-spacing: -.05em; margin: 6px 0; }
+      .muted { color: var(--muted); }
+      .status { display: inline-flex; align-items: center; gap: 7px; border-radius: 100px; padding: 4px 10px; background: var(--soft); color: var(--brand-dark); font-size: .83rem; font-weight: 700; }
+      .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #29875b; }
+      .status.paused { background: var(--warning-bg); color: var(--warning); }
+      .status.paused::before { background: #b87a18; }
+      .row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 0; border-top: 1px solid var(--line); }
+      .row:first-of-type { border-top: 0; }
+      .row p { margin: 1px 0 0; color: var(--muted); font-size: .9rem; }
+      .actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 17px; }
+      .primary, .secondary { border-radius: 9px; padding: 9px 13px; font-weight: 680; }
+      .primary { background: var(--brand); color: #fff; border: 1px solid var(--brand); }
+      .secondary { background: #fff; color: var(--brand); border: 1px solid #a6c9b3; }
+      .primary:hover { background: var(--brand-dark); }
+      .secondary:hover { background: var(--soft); }
+      .step { display: grid; grid-template-columns: 28px 1fr; gap: 10px; margin-top: 15px; }
+      .step b { display: grid; place-items: center; height: 27px; border-radius: 50%; background: var(--soft); color: var(--brand); font-size: .85rem; }
+      .step p { color: var(--muted); font-size: .92rem; margin: 0; }
+      .choice { display: flex; align-items: flex-start; gap: 10px; padding: 11px 0; border-top: 1px solid var(--line); }
+      .choice:first-of-type { border-top: 0; }
+      .choice input { margin-top: 5px; accent-color: var(--brand); }
+      .choice strong { display: block; }
+      .choice small { display: block; color: var(--muted); font-size: .88rem; }
+      .field { display: grid; gap: 5px; margin-top: 13px; font-weight: 650; }
+      .field input, .field select { width: 100%; max-width: 560px; border: 1px solid #abc0b0; border-radius: 9px; padding: 10px 11px; background: #fff; color: var(--ink); font: inherit; }
+      .field small { font-weight: 400; color: var(--muted); }
+      .callout { border-radius: 10px; padding: 12px 14px; margin-top: 16px; background: var(--warning-bg); color: var(--warning); }
+      .panel[hidden] { display: none; }
+      .notice { min-height: 25px; color: var(--brand-dark); font-size: .9rem; margin-top: 18px; }
+      footer { color: var(--muted); font-size: .82rem; margin-top: 34px; }
+      @media (max-width: 800px) {
+        .shell { display: block; }
+        aside { padding: 15px; }
+        .brand { padding: 0 5px 10px; }
+        nav { display: flex; overflow-x: auto; }
+        nav button { white-space: nowrap; width: auto; }
+        .aside-note { display: none; }
+        .grid, .grid.three { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <aside>
+        <div class="brand">NanoClaw<small>Console privata · prototipo</small></div>
+        <nav aria-label="Sezioni del prototipo">
+          <button type="button" aria-selected="true" data-target="overview">Panoramica</button>
+          <button type="button" aria-selected="false" data-target="agents">Agenti</button>
+          <button type="button" aria-selected="false" data-target="channels">Canali</button>
+          <button type="button" aria-selected="false" data-target="models">Modello e provider</button>
+          <button type="button" aria-selected="false" data-target="backups">Backup e import</button>
+          <button type="button" aria-selected="false" data-target="updates">Aggiornamenti</button>
+        </nav>
+        <p class="aside-note">Nessuna connessione al server. Solo dati sintetici.</p>
+      </aside>
+      <main>
+        <header>
+          <div><p class="eyebrow">Amministrazione</p><h1 id="page-title">Panoramica</h1></div>
+          <div class="account"><span class="avatar" aria-hidden="true">A</span> Amministratore · demo</div>
+        </header>
+        <div class="banner" role="note">Prototipo statico: i pulsanti mostrano soltanto il flusso previsto. Non creano backup, non importano file e non eseguono comandi.</div>
+
+        <section class="panel" id="overview" aria-labelledby="page-title">
+          <p class="intro">Una vista sintetica della salute dell'installazione, senza percorsi, indirizzi o log grezzi.</p>
+          <div class="grid three">
+            <article class="card"><h2>Servizi</h2><div class="metric">7 / 7</div><span class="status">Operativi</span></article>
+            <article class="card"><h2>Agenti</h2><div class="metric">2</div><p class="muted">1 attivo · 1 in pausa</p></article>
+            <article class="card"><h2>Backup</h2><div class="metric">1</div><p class="muted">Ultima verifica riuscita</p></article>
+            <article class="card wide"><h2>Diagnostica essenziale</h2>
+              <div class="row"><div><strong>Gateway credenziali</strong><p>Solo stato, nessun valore segreto</p></div><span class="status">Operativo</span></div>
+              <div class="row"><div><strong>Provider predefinito</strong><p>LLM locale · modello di prova</p></div><span class="status">Raggiungibile</span></div>
+              <div class="row"><div><strong>Canali</strong><p>Connessioni verificate dall'host</p></div><span class="status">Operativi</span></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel" id="agents" hidden>
+          <p class="intro">Identità degli agenti e stato operativo. Cronologia e memoria non compaiono nella lista.</p>
+          <div class="card">
+            <div class="row"><div><strong>Agente di prova A</strong><p>Provider configurato · 1 sessione</p></div><span class="status">Attivo</span></div>
+            <div class="row"><div><strong>Agente di prova B</strong><p>Provider configurato · nessuna sessione</p></div><span class="status paused">In pausa</span></div>
+            <div class="actions"><button class="secondary demo-action" type="button">Dettagli agente</button><button class="secondary demo-action" type="button">Riavvia con conferma</button></div>
+          </div>
+        </section>
+
+        <section class="panel" id="channels" hidden>
+          <p class="intro">Solo tipo e stato del canale: nessun token, numero, email o ID di chat nell'elenco.</p>
+          <div class="card">
+            <div class="row"><div><strong>Canale di prova 1</strong><p>Istanza configurata</p></div><span class="status">Connesso</span></div>
+            <div class="row"><div><strong>Canale di prova 2</strong><p>Istanza configurata</p></div><span class="status">Connesso</span></div>
+            <div class="actions"><button class="secondary demo-action" type="button">Configurazione canali</button></div>
+          </div>
+        </section>
+
+        <section class="panel" id="models" hidden>
+          <p class="intro">Scegli un provider e un modello per tutti gli agenti, presenti e futuri. Questo prototipo non salva nulla.</p>
+          <div class="grid">
+            <article class="card wide">
+              <h2>Modalità per tutti gli agenti</h2>
+              <label class="choice"><input type="radio" name="provider-mode" value="local" checked /><span><strong>LLM locale</strong><small>Le richieste restano sul percorso locale configurato.</small></span></label>
+              <label class="choice"><input type="radio" name="provider-mode" value="remote" /><span><strong>Provider esterno</strong><small>Richiede autenticazione e può comportare costi e trasferimento di dati al fornitore.</small></span></label>
+            </article>
+            <article class="card" id="local-model-settings">
+              <h2>Connessione locale</h2>
+              <label class="field">Indirizzo API locale condiviso
+                <input type="url" autocomplete="off" placeholder="http://LLM_HOST:8000/v1" />
+                <small>Valore privato dell'installazione; non entra in Git o nell'immagine.</small>
+              </label>
+              <label class="field">Modello locale
+                <input type="text" autocomplete="off" placeholder="provider/MODEL_ID" />
+                <small>Sarà impostato per tutti gli agenti, anche se oggi hanno un modello individuale.</small>
+              </label>
+              <div class="callout">Prima di applicare, il pannello verificherà la connessione e mostrerà tutti gli agenti coinvolti, le sessioni da interrompere e il piano di riavvio.</div>
+              <div class="actions"><button class="secondary demo-action" type="button">Verifica connessione</button><button class="primary demo-action" type="button">Salva e applica</button></div>
+            </article>
+            <article class="card" id="remote-model-settings" hidden>
+              <h2>Provider esterno</h2>
+              <label class="field">Tipo di accesso
+                <select>
+                  <option>Claude</option>
+                  <option>ChatGPT tramite login supportato dal setup</option>
+                  <option>OpenAI API con chiave dedicata</option>
+                </select>
+              </label>
+              <label class="field">Modello
+                <input type="text" autocomplete="off" placeholder="Selezione dopo la connessione" />
+              </label>
+              <div class="callout">Attivando un provider esterno, le richieste e il contesto di tutti gli agenti possono lasciare la rete locale. La conferma reale mostrerà gli agenti coinvolti e verificherà che credenziali e permessi siano pronti per ciascuno.</div>
+              <div class="actions"><button class="secondary demo-action" type="button">Configura credenziale</button><button class="primary demo-action" type="button">Salva e applica</button></div>
+            </article>
+            <article class="card wide">
+              <h2>Impatto del cambio</h2>
+              <p class="muted">La configurazione scelta sarà applicata automaticamente a ogni agente esistente e diventerà il predefinito dei nuovi. Non è prevista una selezione per agente.</p>
+              <div class="row"><div><strong>Agente di prova A</strong><p>Provider e modello aggiornati; riavvio controllato</p></div><span class="status paused">Coinvolto</span></div>
+              <div class="row"><div><strong>Agente di prova B</strong><p>Provider e modello aggiornati; riavvio controllato</p></div><span class="status paused">Coinvolto</span></div>
+              <div class="callout">Le impostazioni precedenti saranno salvate per il rollback. Se un agente non può usare il nuovo provider, il cambio non partirà; se l'applicazione fallisce, verrà ripristinata la configurazione precedente.</div>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel" id="backups" hidden>
+          <p class="intro">Backup cifrati e verificati. L'importazione non modifica nulla finché il preflight e la conferma non sono completati.</p>
+          <div class="grid">
+            <article class="card"><h2>Crea backup</h2><p class="muted">Preflight → pausa dei writer → copia coerente → cifratura → verifica → riavvio.</p><div class="actions"><button class="primary demo-action" type="button">Avvia backup</button></div></article>
+            <article class="card"><h2>Esporta</h2><p class="muted">Archivio cifrato e chiave casuale mostrata una sola volta, da salvare separatamente.</p><div class="actions"><button class="secondary demo-action" type="button">Esporta backup verificato</button></div></article>
+            <article class="card wide"><h2>Importa su questa istanza</h2>
+              <div class="step"><b>1</b><div><h3>Carica e verifica</h3><p>Il bundle resta in quarantena; controllo di autenticità, compatibilità e spazio.</p></div></div>
+              <div class="step"><b>2</b><div><h3>Scegli modalità</h3><p>Copia di prova: identità e task disattivati. Migrazione definitiva: sorgente ferma.</p></div></div>
+              <div class="step"><b>3</b><div><h3>Proteggi il target</h3><p>Backup del target verificato, piano delle modifiche e conferma della password.</p></div></div>
+              <div class="actions"><button class="secondary demo-action" type="button">Apri procedura import</button></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel" id="updates" hidden>
+          <p class="intro">Il pannello e il terminale condividono lo stesso job; il recovery resta disponibile anche se la dashboard si ferma.</p>
+          <div class="card"><h2>Release</h2>
+            <div class="row"><div><strong>Installata</strong><p>Release di prova</p></div><span class="status">Verificata</span></div>
+            <div class="row"><div><strong>Candidata</strong><p>Nessuna release selezionata</p></div><span class="status paused">In attesa</span></div>
+            <div class="actions"><button class="secondary demo-action" type="button">Controlla disponibilità</button><button class="primary demo-action" type="button">Avvia preflight</button></div>
+          </div>
+        </section>
+
+        <p class="notice" id="notice" role="status" aria-live="polite"></p>
+        <footer>Prototipo locale con dati inventati. Non caricare backup o credenziali in questa pagina.</footer>
+      </main>
+    </div>
+    <script>
+      const titles = { overview: 'Panoramica', agents: 'Agenti', channels: 'Canali', models: 'Modello e provider', backups: 'Backup e import', updates: 'Aggiornamenti' };
+      const tabs = [...document.querySelectorAll('nav button[data-target]')];
+      const panels = [...document.querySelectorAll('.panel')];
+      const notice = document.getElementById('notice');
+      for (const tab of tabs) tab.addEventListener('click', () => {
+        const target = tab.dataset.target;
+        for (const item of tabs) item.setAttribute('aria-selected', String(item === tab));
+        for (const panel of panels) panel.hidden = panel.id !== target;
+        document.getElementById('page-title').textContent = titles[target];
+        notice.textContent = '';
+      });
+      for (const button of document.querySelectorAll('.demo-action')) button.addEventListener('click', () => {
+        notice.textContent = 'Solo prototipo: questa azione non è collegata a servizi o dati reali.';
+      });
+      for (const input of document.querySelectorAll('input[name="provider-mode"]')) input.addEventListener('change', () => {
+        const remote = document.querySelector('input[name="provider-mode"]:checked').value === 'remote';
+        document.getElementById('local-model-settings').hidden = remote;
+        document.getElementById('remote-model-settings').hidden = !remote;
+        notice.textContent = '';
+      });
+    </script>
+  </body>
+</html>
