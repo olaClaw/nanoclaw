@@ -79,8 +79,27 @@ queues, tasks and Signal state and carries the Signal and Telegram
 identities; run it only when the old install is stopped for good, because two
 instances with the same identities steal each other's messages.
 
-On failure the command prints `import_failed_phase=…`. The previous state
-stays in the work root and the target backup is untouched; no automatic
-rollback is attempted. A rehearsal can be rerun after fixing the cause. For a
-cutover, the old install is the rollback: stop the Compose stack and start the
-old units again.
+On failure the command prints `import_failed_phase=…` and the transaction
+name. The previous state stays in the work root and the target backup is
+untouched. Do not rerun an import on top of a failed one; roll back first.
+
+## Rolling back a failed or unwanted import
+
+```sh
+python3 compose-import-legacy.py \
+  --project-root /path/to/compose/checkout --state-root /srv/nanoclaw \
+  --rollback-txn /root/import-work/TRANSACTION \
+  --target-backup-dir /root/backups/BACKUP_ID --target-backup-key /root/backup-keys/BACKUP_ID.key
+```
+
+Without `--apply` this checks that the transaction still holds the previous
+`data/`, `groups/`, `.env` and mail config for the current release, and stages
+the verified target backup. With `--apply` and
+`--confirm-restore-previous-state` it stops the stack, moves the imported state
+into the transaction's `discarded/` directory, puts the previous state, `.env`
+and mail config back, recreates the OneCLI and PostgreSQL volumes from the
+target backup and starts the stack. The discarded copy still contains the
+imported data in plaintext; delete it once the rollback has been checked.
+
+For a cutover, the old install remains the primary rollback: stop the Compose
+stack and start the old units again.

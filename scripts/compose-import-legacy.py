@@ -267,13 +267,40 @@ def atomic_write(path, content, uid, gid, mode):
             os.unlink(temporary)
 
 
-def volume_name(project, service, destination):
-    _, container = compose(project, 'ps', '-aq', service)
-    require(container, 'service_missing')
-    _, raw = run(['docker', 'inspect', container])
-    mounts = [m for m in json.loads(raw)[0]['Mounts'] if m['Destination'] == destination and m['Type'] == 'volume']
-    require(len(mounts) == 1, 'volume_mount_unexpected')
-    return mounts[0]['Name']
+def volume_names(project):
+    """Docker names of the OneCLI data and PostgreSQL volumes, from the resolved Compose config."""
+    _, raw = compose(project, 'config', '--format', 'json')
+    volumes = json.loads(raw).get('volumes', {})
+    names = tuple((volumes.get(key) or {}).get('name') for key in ('onecli-data', 'onecli-pgdata'))
+    require(all(isinstance(n, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', n) for n in names),
+            'volume_names_unresolved')
+    return names
+
+
+def restore_onecli(project, dump, onecli_source, volumes):
+    """Recreate the OneCLI and PostgreSQL volumes from a dump and a copy of OneCLI /app/data."""
+    onecli_volume, _ = volumes
+    compose(project, 'rm', '-sf', 'onecli-egress', 'onecli', 'postgres')
+    for volume in volumes:
+        if run(['docker', 'volume', 'inspect', volume], check=False)[0] == 0:
+            run(['docker', 'volume', 'rm', volume])
+    compose(project, 'up', '-d', '--wait', '--no-deps', 'postgres')
+    with dump.open('rb') as stream:
+        compose(project, 'exec', '-T', 'postgres', 'pg_restore', '--no-owner', '--no-privileges',
+                '-U', 'onecli', '-d', 'onecli', stdin=stream)
+    # `create` has no --no-deps; --no-recreate leaves the running PostgreSQL alone.
+    compose(project, 'create', '--no-recreate', 'onecli')
+    _, mountpoint = run(['docker', 'volume', 'inspect', '-f', '{{.Mountpoint}}', onecli_volume])
+    target = RECOVERY.source_path(mountpoint, kind='dir')
+    run(['cp', '-a', str(onecli_source) + '/.', str(target) + '/'])
+
+
+def stop_stack(project, install_id):
+    compose(project, 'stop')
+    if install_id:
+        _, agents = run(['docker', 'ps', '-q', '--filter', f'label=nanoclaw-install={install_id}'])
+        if agents:
+            run(['docker', 'stop', *agents.split()])
 
 
 def services_healthy(project):
@@ -364,13 +391,8 @@ def apply_import(ctx, mode):
     project, state, txn = ctx['project'], ctx['state'], ctx['txn']
     phase = 'stop_stack'
     try:
-        onecli_volume = volume_name(project, 'onecli', '/app/data')
-        pg_volume = volume_name(project, 'postgres', '/var/lib/postgresql')
-        compose(project, 'stop')
-        if ctx['target_install']:
-            _, agents = run(['docker', 'ps', '-q', '--filter', f'label=nanoclaw-install={ctx["target_install"]}'])
-            if agents:
-                run(['docker', 'stop', *agents.split()])
+        volumes = volume_names(project)
+        stop_stack(project, ctx['target_install'])
         print('target_stack_stopped=yes', flush=True)
 
         phase = 'set_aside_current_state'
@@ -427,16 +449,7 @@ def apply_import(ctx, mode):
         atomic_write(ctx['env_file'], ctx['merged_env'].encode(), info.st_uid, info.st_gid, 0o600)
 
         phase = 'onecli_volumes'
-        compose(project, 'rm', '-sf', 'onecli-egress', 'onecli', 'postgres')
-        run(['docker', 'volume', 'rm', onecli_volume, pg_volume])
-        compose(project, 'up', '-d', '--wait', '--no-deps', 'postgres')
-        with ctx['dump'].open('rb') as stream:
-            compose(project, 'exec', '-T', 'postgres', 'pg_restore', '--no-owner', '--no-privileges',
-                    '-U', 'onecli', '-d', 'onecli', stdin=stream)
-        compose(project, 'create', '--no-deps', 'onecli')
-        _, mountpoint = run(['docker', 'volume', 'inspect', '-f', '{{.Mountpoint}}', onecli_volume])
-        target = RECOVERY.source_path(mountpoint, kind='dir')
-        run(['cp', '-a', str(stage / 'onecli-data') + '/.', str(target) + '/'])
+        restore_onecli(project, ctx['dump'], stage / 'onecli-data', volumes)
         print('onecli_state_restored=yes', flush=True)
 
         phase = 'start_stack'
@@ -450,24 +463,112 @@ def apply_import(ctx, mode):
         print('import=healthy', flush=True)
     except Exception:
         print(f'import_failed_phase={phase}', flush=True)
-        print('rollback=manual_previous_state_and_target_backup_retained', flush=True)
+        print(f'import_transaction={txn.name}', flush=True)
+        print('rollback=available_with_--rollback-txn', flush=True)
         raise
     finally:
         shutil.rmtree(ctx['plain'], ignore_errors=True)
         shutil.rmtree(txn / 'stage', ignore_errors=True)
 
 
+ROLLBACK_REQUIRED = ('data', 'groups', 'env', 'mail-config')
+
+
+def rollback(args):
+    """Return the target to the state set aside by an import transaction."""
+    project = RECOVERY.source_path(args.project_root, kind='dir')
+    state = RECOVERY.source_path(args.state_root, kind='dir')
+    txn = RECOVERY.private_directory(Path(args.rollback_txn))
+    backup = RECOVERY.private_directory(Path(args.target_backup_dir))
+    backup_key = RECOVERY.source_path(args.target_backup_key, kind='file')
+    for path in (txn, backup, backup_key.parent):
+        RECOVERY.not_nested(path, project)
+        RECOVERY.not_nested(path, state)
+    require(txn.stat().st_dev == state.stat().st_dev, 'work_root_cross_filesystem')
+    previous = txn / 'previous'
+    require(previous.is_dir() and not previous.is_symlink() and
+            all((previous / name).exists() for name in ROLLBACK_REQUIRED), 'previous_state_incomplete')
+    release = json.loads((state / 'release.json').read_text())
+    marker = json.loads((previous / 'data/upgrade-state.json').read_text())
+    require(marker.get('commit') == release.get('revision'), 'previous_state_release_mismatch')
+    backup_manifest = json.loads((backup / 'manifest.json').read_text())
+    require(backup_manifest.get('revision') == release['revision'], 'target_backup_release_mismatch')
+    previous_env = parse_env((previous / 'env').read_text())
+    mail_target = Path(previous_env.get('INFOMANIAK_BROKER_CONFIG_FILE', ''))
+    require(mail_target.is_absolute(), 'target_mail_config_missing')
+    volumes = volume_names(project)
+    stage = txn / 'rollback-stage'
+    require(not stage.exists() and not stage.is_symlink(), 'rollback_stage_exists')
+    try:
+        RECOVERY.verify_or_stage(argparse.Namespace(action='stage', backup_dir=str(backup), key_file=str(backup_key),
+                                                    target_dir=str(stage), confirm_sensitive_plaintext=True))
+        require((stage / 'postgres.dump').is_file() and (stage / 'onecli-data').is_dir(), 'target_backup_incomplete')
+        print('rollback_preflight=ok', flush=True)
+        if not args.apply:
+            print('rollback_mutation=disabled', flush=True)
+            return
+        require(args.confirm_restore_previous_state, 'rollback_confirmation_required')
+        _apply_rollback(project, state, txn, previous, previous_env, mail_target, stage, volumes)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def _apply_rollback(project, state, txn, previous, previous_env, mail_target, stage, volumes):
+    phase = 'stop_stack'
+    try:
+        stop_stack(project, previous_env.get('NANOCLAW_INSTALL_ID', ''))
+        print('target_stack_stopped=yes', flush=True)
+
+        phase = 'set_aside_imported_state'
+        discarded = txn / 'discarded'
+        discarded.mkdir(mode=0o700, exist_ok=True)
+        for entry in STATE_ENTRIES:
+            if (state / entry).exists() or (state / entry).is_symlink():
+                require(not (discarded / entry).exists(), 'discarded_state_exists')
+                os.replace(state / entry, discarded / entry)
+
+        phase = 'restore_previous_state'
+        for entry in STATE_ENTRIES:
+            if (previous / entry).exists():
+                os.replace(previous / entry, state / entry)
+
+        phase = 'restore_configuration'
+        env_file = project / '.env'
+        info = env_file.stat()
+        atomic_write(env_file, (previous / 'env').read_bytes(), info.st_uid, info.st_gid, 0o600)
+        atomic_write(mail_target, (previous / 'mail-config').read_bytes(), SERVICE_UID, SERVICE_GID, 0o600)
+
+        phase = 'onecli_volumes'
+        restore_onecli(project, stage / 'postgres.dump', stage / 'onecli-data', volumes)
+
+        phase = 'start_stack'
+        compose(project, 'up', '-d', '--wait')
+        require(services_healthy(project), 'restored_stack_unhealthy')
+        print('rollback=healthy', flush=True)
+        print('imported_state=retained_in_transaction', flush=True)
+    except Exception:
+        print(f'rollback_failed_phase={phase}', flush=True)
+        raise
+
+
 def main():
     parser = RECOVERY.PrivateArgumentParser(description=__doc__)
-    for flag in ('project-root', 'state-root', 'snapshot-dir', 'key-file', 'work-root',
-                 'target-backup-dir', 'target-backup-key'):
+    for flag in ('project-root', 'state-root', 'target-backup-dir', 'target-backup-key'):
         parser.add_argument('--' + flag, required=True)
-    parser.add_argument('--mode', required=True, choices=('rehearsal', 'cutover'))
+    for flag in ('snapshot-dir', 'key-file', 'work-root', 'rollback-txn'):
+        parser.add_argument('--' + flag)
+    parser.add_argument('--mode', choices=('rehearsal', 'cutover'))
     parser.add_argument('--confirm-replace-target-state', action='store_true')
+    parser.add_argument('--confirm-restore-previous-state', action='store_true')
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     os.umask(0o077)
     require(os.geteuid() == 0, 'root_required')
+    if args.rollback_txn:
+        require(not (args.snapshot_dir or args.key_file or args.work_root or args.mode), 'invalid_arguments')
+        rollback(args)
+        return
+    require(args.snapshot_dir and args.key_file and args.work_root and args.mode, 'invalid_arguments')
     ctx = preflight(args)
     try:
         if not args.apply:
