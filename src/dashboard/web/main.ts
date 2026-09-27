@@ -5,6 +5,7 @@
  *   NANOCLAW_DASHBOARD_ADMIN_SOCKET  the host boundary's Unix socket
  *   NANOCLAW_DASHBOARD_ORIGIN        exact https origin the browser uses
  *   NANOCLAW_DASHBOARD_PORT          listening port on the internal network (default 8080)
+ *   NANOCLAW_DASHBOARD_OPS_SOCKET    optional: the root-side operations service's socket
  *
  * TLS is terminated by the reverse proxy in front of it; this port is never
  * published on the host.
@@ -33,13 +34,19 @@ export function dashboardConfigFromEnv(env: NodeJS.ProcessEnv = process.env) {
     socket: env.NANOCLAW_DASHBOARD_ADMIN_SOCKET ?? required('NANOCLAW_DASHBOARD_ADMIN_SOCKET'),
     origin,
     port,
+    opsSocket: env.NANOCLAW_DASHBOARD_OPS_SOCKET || null,
   };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const config = dashboardConfigFromEnv();
   const state = new DashboardState(config.stateDir);
-  const server = createDashboardServer({ state, origin: config.origin, forward: socketForward(config.socket) });
+  const server = createDashboardServer({
+    state,
+    origin: config.origin,
+    forward: socketForward(config.socket),
+    opsForward: config.opsSocket ? socketForward(config.opsSocket) : undefined,
+  });
   server.requestTimeout = 30_000;
   server.headersTimeout = 15_000;
   server.listen(config.port, () => process.stdout.write('dashboard listening\n'));

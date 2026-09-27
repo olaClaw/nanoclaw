@@ -151,6 +151,7 @@ export const APP_JS = String.raw`'use strict';
     not_implemented: 'Non ancora disponibile: arriverà con il servizio operativo.',
     rate_limited: 'Troppe richieste: attendi un minuto.',
     upstream_unavailable: 'Il servizio NanoClaw non risponde.',
+    ops_unavailable: 'Servizio operativo non attivo su questo server: backup e aggiornamenti restano disponibili da terminale.',
     upstream_invalid: 'Risposta del servizio non valida.',
     release_unknown: 'Release installata non determinabile.',
     not_found: 'Elemento non trovato.',
@@ -159,6 +160,7 @@ export const APP_JS = String.raw`'use strict';
     healthy: ['Operativo', ''], unhealthy: ['Non sano', 'bad'], stopped: ['Fermo', 'warn'], unknown: ['Sconosciuto', 'warn'],
     connected: ['Connesso', ''], disconnected: ['Disconnesso', 'bad'], reachable: ['Raggiungibile', ''], unreachable: ['Non raggiungibile', 'bad'],
     running: ['In esecuzione', ''], idle: ['Inattivo', 'warn'], active: ['Attiva', ''], closed: ['Chiusa', 'warn'],
+    verified: ['Verificato', ''], unverified: ['Non verificato', 'warn'], failed: ['Verifica fallita', 'bad'],
     local: ['LLM locale', ''], external: ['Provider esterno', 'warn'], mixed: ['Configurazione mista', 'warn'], unconfigured: ['Non configurato', 'warn'],
   };
 
@@ -317,13 +319,68 @@ export const APP_JS = String.raw`'use strict';
     ));
   }
 
-  async function renderPending(view, path) {
-    const result = await api('GET', path);
-    if (result.status === 200) {
-      view.append(wide(null, el('p', { class: 'muted' }, 'Dati disponibili.')));
-      return;
+  const OUTCOMES = {
+    running: ['In corso', 'warn'], preflight_ok: ['Verifica preliminare ok', ''], succeeded: ['Riuscito', ''],
+    failed: ['Fallito, nulla modificato', 'bad'], rolled_back: ['Fallito, ripristinato', 'warn'],
+    rollback_failed: ['Ripristino fallito', 'bad'], interrupted: ['Interrotto', 'bad'],
+  };
+  const PHASES = {
+    preflight: 'verifica preliminare', control_backup: 'copia dei file di controllo', stop_host: 'arresto dell\'host',
+    switch_release: 'cambio di release', start_services: 'avvio dei servizi', wait_channels: 'attesa dei canali',
+    refresh_images: 'aggiornamento immagini', refresh_dashboard: 'aggiornamento dashboard', rollback: 'ripristino',
+  };
+  const outcome = (key) => {
+    const [label, tone] = OUTCOMES[key] || [key, 'warn'];
+    return el('span', { class: 'status ' + tone }, label);
+  };
+  const size = (bytes) => {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let value = bytes; let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+    return value.toLocaleString('it-IT', { maximumFractionDigits: 1 }) + ' ' + units[unit];
+  };
+
+  async function renderUpdates(view) {
+    const result = await api('GET', '/releases');
+    if (result.status !== 200) return fail(view, result);
+    const r = result.data;
+    const cards = [
+      card('Installata', el('div', { class: 'metric' }, r.installed.version), el('p', { class: 'muted' }, 'Revisione ' + r.installed.revision.slice(0, 8))),
+      card('Candidata', r.candidate
+        ? [el('div', { class: 'metric' }, r.candidate.version), el('p', { class: 'muted' }, 'Revisione ' + r.candidate.revision.slice(0, 8))]
+        : el('p', { class: 'muted' }, 'Nessuna release candidata.')),
+    ];
+    const u = r.last_update;
+    const last = u
+      ? wide('Ultimo aggiornamento', pairs([
+        ['Esito', outcome(u.outcome)],
+        ['Da → a', (u.release && u.release.from_revision ? u.release.from_revision.slice(0, 8) : '—') + ' → ' + (u.release && u.release.to_revision ? u.release.to_revision.slice(0, 8) : '—')],
+        ['Ultima fase', PHASES[u.phase] || u.phase],
+        ['Motivo', u.failure_category ? u.failure_category.replaceAll('_', ' ') : '—'],
+        ['Ripristino', u.rollback ? u.rollback.replaceAll('_', ' ') : '—'],
+        ['Iniziato', when(u.started_at)],
+        ['Terminato', when(u.finished_at)],
+      ]), u.phases.length ? el('p', { class: 'muted' }, 'Fasi: ' + u.phases.map((p) => PHASES[p.phase] || p.phase).join(' → ')) : null)
+      : wide('Ultimo aggiornamento', el('p', { class: 'muted' }, 'Nessun aggiornamento registrato.'));
+    view.append(el('div', { class: 'grid' }, cards, last,
+      wide(null, el('p', { class: 'muted' }, 'L\'avvio di un aggiornamento dal pannello arriverà in una prossima versione; oggi si avvia da terminale.'))));
+  }
+
+  async function renderBackups(view, cursor) {
+    const result = await api('GET', '/backups' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''));
+    if (result.status !== 200) return fail(view, result);
+    const b = result.data;
+    view.append(wide(null, b.items.length ? b.items.map((item) => row(
+      'Backup del ' + when(item.created_at),
+      'Release ' + item.release_revision.slice(0, 8) + ' · ' + size(item.size_bytes),
+      status(item.verification),
+    )) : el('p', { class: 'muted' }, 'Nessun backup.')));
+    if (b.next_cursor) {
+      const more = el('button', { class: 'secondary', type: 'button', onclick: () => { more.remove(); renderBackups(view, b.next_cursor); } }, 'Carica altri');
+      view.append(more);
+    } else if (!cursor) {
+      view.append(wide(null, el('p', { class: 'muted' }, 'Creazione, verifica ed esportazione dal pannello arriveranno in una prossima versione.')));
     }
-    fail(view, result);
   }
 
   function fail(view, result) {
@@ -343,7 +400,7 @@ export const APP_JS = String.raw`'use strict';
     view.replaceChildren();
     const renderers = {
       overview: renderOverview, agents: renderAgents, channels: renderChannels, sessions: renderSessions, model: renderModel,
-      backups: (v) => renderPending(v, '/backups'), updates: (v) => renderPending(v, '/releases'),
+      backups: renderBackups, updates: renderUpdates,
     };
     await renderers[name](view);
   }

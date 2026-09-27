@@ -212,6 +212,28 @@ The dashboard itself listens only on the server's loopback address
 (`NANOCLAW_DASHBOARD_LOOPBACK_PORT`, default 18080), for API checks through an
 SSH tunnel. Browsers use HTTPS through the `proxy` service of the same profile.
 
+### Operations service (backups, updates)
+
+The dashboard's backup and update screens are served by a small root-side
+service, `scripts/compose-ops.py`, which runs on the Compose host outside
+Docker (read-only for now: installed and candidate release, backups, update
+jobs). It reads the release manifest, the release-update job state and the
+backup folders, never keys or archives, and answers on a Unix socket in
+`/var/lib/nanoclaw-ops/sock/` that only the dashboard's group (61001) can open;
+the dashboard mounts that directory read-only. Without it the screens say the
+service is not active and the CLI tools keep working as before.
+
+1. Copy `scripts/compose-ops.py` from a reviewed checkout to
+   `/usr/local/lib/nanoclaw/compose-ops.py` (root-owned, `0644`) and check its
+   SHA-256 against that checkout.
+2. `install -d -m 750 -o root -g 61001 /var/lib/nanoclaw-ops/sock`. Point
+   `/var/lib/nanoclaw-ops/{backups,release-backups,candidates}` at the backup
+   root, the release-update control root and a directory of verified candidate
+   manifests (symlinks or edit the unit's paths).
+3. Install `deploy/ops/nanoclaw-ops.service` in `/etc/systemd/system/`, then
+   `systemctl daemon-reload && systemctl enable --now nanoclaw-ops`.
+4. Recreate the `dashboard` service so it sees the socket.
+
 ### HTTPS proxy
 
 `proxy` is Nginx Proxy Manager 2.16.0, pinned by digest in `compose.yaml`. It
