@@ -103,6 +103,8 @@ export const job = object({
   release: nullable(
     object({ from_revision: nullable(revision), to_revision: nullable(revision), to_version: nullable(version) }),
   ),
+  /** The backup a `backup_create` job produced, once known. */
+  backup: nullable(backupId),
   phases: array(object({ phase: code, at: timestamp }), 32),
   started_at: timestamp,
   updated_at: timestamp,
@@ -206,6 +208,8 @@ export const backupList = page(
     size_bytes: int(0, Number.MAX_SAFE_INTEGER),
     verification: oneOf('verified', 'unverified', 'failed'),
     exportable: bool,
+    /** The backup's key is still on the server, waiting to be saved by the operator. */
+    key_on_host: bool,
   }),
 );
 
@@ -242,6 +246,14 @@ export const secretRequest = object({ action: oneOf('set', 'revoke'), value: nul
 export const secretState = object({ kind: secretKind, configured: bool, rotated_at: nullable(timestamp) });
 
 export const updateRequest = object({ release_revision: revision, confirm: confirmed });
+
+/**
+ * A backup's key, shown once so the operator can store it in a password
+ * manager; `backup_key_saved` then removes it from the server. The one
+ * response in the contract that carries a secret, by the operator's choice.
+ */
+export const backupKey = object({ backup: backupId, key: str(64, /^[0-9a-f]{64}$/) });
+export const backupKeyState = object({ backup: backupId, key_on_host: bool });
 export const backupCreateRequest = object({ confirm: confirmed });
 
 export type Overview = Infer<typeof overview>;
@@ -456,6 +468,24 @@ export const ENDPOINTS: readonly Endpoint[] = [
     path: '/api/v1/backups/{backup}/verify',
     request: empty,
     response: jobAccepted,
+    status: 'v1',
+    epic: 'D4',
+  },
+  {
+    name: 'backup_key',
+    method: 'POST',
+    path: '/api/v1/backups/{backup}/key',
+    request: backupCreateRequest,
+    response: backupKey,
+    status: 'v1',
+    epic: 'D4',
+  },
+  {
+    name: 'backup_key_saved',
+    method: 'POST',
+    path: '/api/v1/backups/{backup}/key/saved',
+    request: backupCreateRequest,
+    response: backupKeyState,
     status: 'v1',
     epic: 'D4',
   },

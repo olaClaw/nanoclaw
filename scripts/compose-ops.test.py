@@ -154,5 +154,120 @@ class SocketTests(unittest.TestCase):
                 server.server_close()
 
 
+FAKE_RECOVERY = """
+import os, sys, secrets
+args = dict(zip(sys.argv[2::2], sys.argv[3::2]))
+if os.environ.get('FAKE_BACKUP_FAIL'):
+    print('backup_preflight=ok'); print('failure_category=postgres_dump_empty'); sys.exit(2)
+name = 'aaaaaaaa-20260115T130000Z-' + secrets.token_hex(3)
+folder = os.path.join(args['--backup-root'], name); os.mkdir(folder, 0o700)
+open(os.path.join(folder, 'manifest.json'), 'w').write('{"revision": "' + 'a' * 40 + '", "created_utc": "20260115T130000Z", "hmac_sha256": "x"}')
+os.chmod(os.path.join(folder, 'manifest.json'), 0o600)
+key = os.path.join(args['--key-root'], name + '.key'); open(key, 'w').write(secrets.token_hex(32) + '\\n'); os.chmod(key, 0o600)
+print('backup=verified')
+"""
+
+
+class BackupOperationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = self.root = Path(self.temp.name)
+        base = fixture(root, 0)
+        for name in ('keys', 'jobs', 'project'):
+            (root / name).mkdir(mode=0o700)
+        script = root / 'compose-recovery.py'
+        script.write_text(FAKE_RECOVERY)
+        self.sources = OPS.Sources(base.state_root, base.backup_root, base.control_root, None, KEY,
+                                   key_root=root / 'keys', project_root=root / 'project',
+                                   jobs_dir=root / 'jobs', recovery_script=script)
+        (base.backup_root).mkdir(exist_ok=True)
+
+    def tearDown(self):
+        os.environ.pop('FAKE_BACKUP_FAIL', None)
+        self.temp.cleanup()
+
+    def wait(self, job_id):
+        for _ in range(100):
+            job = OPS.handle(self.sources, 'GET', f'/api/v1/jobs/{job_id}')[1]
+            if job['outcome'] != 'running':
+                return job
+            threading.Event().wait(0.05)
+        self.fail('job did not finish')
+
+    def test_backup_job_then_key_shown_once_and_shredded(self):
+        status, accepted = OPS.handle(self.sources, 'POST', '/api/v1/backups', {'confirm': True})
+        self.assertEqual((status, accepted['job']['kind']), (202, 'backup_create'))
+        job = self.wait(accepted['job']['id'])
+        self.assertEqual((job['outcome'], job['phase'], job['failure_category']), ('succeeded', 'done', None))
+        backup = job['backup']
+        self.assertRegex(backup, r'^bkp_[0-9a-f]{32}$')
+        listed = OPS.handle(self.sources, 'GET', '/api/v1/backups')[1]['items']
+        self.assertEqual([(item['id'], item['key_on_host']) for item in listed], [(backup, True)])
+
+        shown = OPS.handle(self.sources, 'POST', f'/api/v1/backups/{backup}/key', {'confirm': True})[1]
+        self.assertRegex(shown['key'], r'^[0-9a-f]{64}$')
+        key_file = next((self.root / 'keys').iterdir())
+        self.assertEqual(key_file.read_text().strip(), shown['key'])
+
+        saved = OPS.handle(self.sources, 'POST', f'/api/v1/backups/{backup}/key/saved', {'confirm': True})[1]
+        self.assertEqual(saved, {'backup': backup, 'key_on_host': False})
+        self.assertFalse(key_file.exists())
+        with self.assertRaises(OPS.OpsError) as caught:
+            OPS.handle(self.sources, 'POST', f'/api/v1/backups/{backup}/key', {'confirm': True})
+        self.assertEqual(caught.exception.code, 'key_not_on_host')
+        self.assertFalse(OPS.handle(self.sources, 'GET', '/api/v1/backups')[1]['items'][0]['key_on_host'])
+
+    def test_failed_backup_reports_the_tool_category(self):
+        os.environ['FAKE_BACKUP_FAIL'] = '1'
+        job_id = OPS.handle(self.sources, 'POST', '/api/v1/backups', {'confirm': True})[1]['job']['id']
+        job = self.wait(job_id)
+        self.assertEqual((job['outcome'], job['failure_category'], job['backup']), ('failed', 'postgres_dump_empty', None))
+
+    def test_refuses_while_the_update_lock_is_held(self):
+        fd = os.open(self.sources.control_root / OPS.LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            OPS.fcntl.flock(fd, OPS.fcntl.LOCK_EX)
+            with self.assertRaises(OPS.OpsError) as caught:
+                OPS.handle(self.sources, 'POST', '/api/v1/backups', {'confirm': True})
+            self.assertEqual((caught.exception.status, caught.exception.code), (409, 'operation_in_progress'))
+        finally:
+            os.close(fd)
+        self.assertEqual(list((self.root / 'jobs').iterdir()), [])
+
+    def test_bodies_ids_and_methods_are_checked(self):
+        for body in (None, {}, {'confirm': False}, {'confirm': True, 'extra': 1}, [True]):
+            with self.subTest(body=body), self.assertRaises(OPS.OpsError) as caught:
+                OPS.handle(self.sources, 'POST', '/api/v1/backups', body)
+            self.assertEqual(caught.exception.code, 'invalid_request')
+        for target in ('/api/v1/backups/bkp_' + '0' * 32 + '/key', '/api/v1/backups/../key'):
+            with self.subTest(target=target), self.assertRaises(OPS.OpsError) as caught:
+                OPS.handle(self.sources, 'POST', target, {'confirm': True})
+            self.assertEqual(caught.exception.code, 'not_found')
+        with self.assertRaises(OPS.OpsError) as caught:
+            OPS.handle(self.sources, 'GET', '/api/v1/backups/bkp_' + '0' * 32 + '/key')
+        self.assertEqual(caught.exception.code, 'method_not_allowed')
+
+    def test_linked_roots_reach_the_backup_tool_as_real_paths(self):
+        links = self.root / 'links'
+        links.mkdir()
+        for name, target in (('backups', self.sources.backup_root), ('keys', self.root / 'keys'),
+                             ('project', self.root / 'project'), ('control', self.sources.control_root)):
+            (links / name).symlink_to(target)
+        linked = OPS.Sources(self.sources.state_root, links / 'backups', links / 'control', None, KEY,
+                             key_root=links / 'keys', project_root=links / 'project',
+                             jobs_dir=self.root / 'jobs', recovery_script=self.sources.recovery_script)
+        for path in (linked.backup_root, linked.key_root, linked.project_root, linked.control_root):
+            self.assertFalse(path.is_symlink())
+        job_id = OPS.handle(linked, 'POST', '/api/v1/backups', {'confirm': True})[1]['job']['id']
+        self.sources = linked
+        self.assertEqual(self.wait(job_id)['outcome'], 'succeeded')
+
+    def test_without_operation_paths_backups_stay_not_implemented(self):
+        read_only = OPS.Sources(self.sources.state_root, self.sources.backup_root, self.sources.control_root, None, KEY)
+        with self.assertRaises(OPS.OpsError) as caught:
+            OPS.handle(read_only, 'POST', '/api/v1/backups', {'confirm': True})
+        self.assertEqual(caught.exception.code, 'not_implemented')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
