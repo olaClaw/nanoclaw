@@ -1,7 +1,24 @@
 # NanoClaw dashboard — functional and API contract, draft v0
 
-Status: design only; no endpoint implemented. Deployment and security
-decisions: [design.md](design.md).
+Status: D0 contract defined in code; no endpoint implemented. Deployment and
+security decisions: [design.md](design.md); threats:
+[threat-model.md](threat-model.md).
+
+**Normative source:** `src/dashboard/contract/` (`api.ts` for schemas and
+endpoints, `authorization.ts` for the per-endpoint policy, `examples.ts` for
+one valid example response per endpoint). The tables below summarize it; if
+they disagree, the code and its tests win. D0 settled these points:
+
+- Public IDs (`agt_`, `chn_`, `ses_`, `bkp_` + 32 hex) are HMAC-derived from
+  the internal ID with a per-install key; internal IDs never leave the host.
+- Every job, including release updates, uses one shape and is read at
+  `GET /api/v1/jobs/{job}`; it mirrors the release-update job state.
+- Authentication endpoints: `POST`/`GET`/`DELETE /api/v1/session` and
+  `POST /api/v1/session/reauth`; `GET /api/v1/health` is the anonymous probe.
+- Activity times are rounded to the minute; all strings are bounded and
+  printable-only; lists hold at most 200 items with a cursor.
+- Export/import payloads stay `draft` until D5 settles the key delivery and
+  upload framing.
 
 ## Observations from the current code
 
@@ -65,7 +82,7 @@ Later diagnostics use structured events redacted at the source.
 | Change provider/model | `POST /api/v1/model-settings/preflight`, `POST /api/v1/model-settings/apply` | re-authentication, endpoint and model validation, preflight of every agent, restart plan, configuration snapshot and verified global rollback |
 | Create/replace/revoke secret | `POST /api/v1/secrets/{kind}` | re-authentication, value input-only, never readable, audit without the value |
 | Start update | `POST /api/v1/updates` | re-authentication, verified release, lock shared with the CLI, job ID |
-| Update status | `GET /api/v1/updates/{job_id}` | redacted steps/outcomes only; limited polling |
+| Job status (updates included) | `GET /api/v1/jobs/{job}` | redacted steps/outcomes only; limited polling |
 | Create/verify backup | `POST /api/v1/backups`, `POST /api/v1/backups/{id}/verify` | re-authentication, lock shared with update/import, asynchronous job, verification before offering export |
 | Export backup | `POST /api/v1/backups/{id}/export` | re-authentication, encrypted and authenticated bundle, streamed transfer, key outside the bundle |
 | Import backup | `POST /api/v1/imports/preflight`, `POST /api/v1/imports/{job_id}/apply` | upload/stage in quarantine, verification, compatibility, target backup and strong confirmation before mutating |
