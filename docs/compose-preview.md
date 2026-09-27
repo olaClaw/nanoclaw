@@ -280,6 +280,32 @@ certificates and DNS-provider token live in `/srv/nanoclaw/proxy`, inside the
 encrypted backup (the backup accepts the certificate store's own relative
 links under `proxy/letsencrypt/`, nothing else).
 
+**Guided setup (recommended).** After step 1 below, run as root on the
+Compose host:
+
+```sh
+python3 scripts/compose-https-setup.py --project-root /path/to/checkout
+```
+
+It asks for the panel's hostname, the LAN/VPN address to publish 443 on, an
+email address and the certificate mode, then does everything through the
+proxy's API: it writes the two `.env` keys, recreates `dashboard` and
+`proxy`, creates the proxy administrator on a fresh proxy (random password,
+printed once: store it in a password manager), obtains the certificate,
+creates the proxy host and checks the panel over HTTPS. Modes:
+
+- `letsencrypt`: DNS-01 with one of the DNS providers the pinned proxy image
+  ships (the script lists them). It asks for the provider's credentials with
+  hidden input; they are stored only in the proxy's own database. Create the
+  provider token with the least rights that allow DNS changes.
+- `local`: for installs without a domain. The script generates a certificate
+  for the hostname on the host; the connection is encrypted, but browsers
+  warn until the certificate is trusted on each device.
+
+`--check` prints the plan and changes nothing; running it again reuses the
+certificate and updates the proxy host. The admin UI is still available on
+loopback for anything else. Manual setup:
+
 1. `install -d -m 700 /srv/nanoclaw/proxy /srv/nanoclaw/proxy/data /srv/nanoclaw/proxy/letsencrypt`.
 2. Set `NANOCLAW_PROXY_BIND` (and the panel's `NANOCLAW_DASHBOARD_ORIGIN`) in
    the private `.env`, then start it with both profiles as above.
