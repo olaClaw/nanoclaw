@@ -18,6 +18,7 @@ on:
 jobs:
   privacy-source:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -58,10 +59,12 @@ jobs:
           python3 scripts/compose-cutover.test.py
           python3 scripts/compose-release-update.test.py
           python3 scripts/compose-import-legacy.test.py
+          python3 scripts/ci-docker-build.test.py
           python3 scripts/compose-rehearsal.test.py
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
         node-version: [22, 24]
@@ -105,6 +108,7 @@ jobs:
 
   iron-front:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -173,22 +177,22 @@ jobs:
           source_tree="$(git rev-parse 'HEAD^{tree}')"
           # BuildKit may fetch bases without tagging them in the Docker image store.
           # The audit needs the exact local base images to compare layer ancestry.
-          docker pull node:22-slim >/dev/null
-          docker pull python:3.12-slim >/dev/null
-          docker build --quiet --build-arg "SOURCE_REVISION=$GITHUB_SHA" --build-arg "SOURCE_TREE=$source_tree" \
-            -t nanoclaw-host:review "$host_context" >/dev/null
+          timeout 600 docker pull node:22-slim >/dev/null
+          timeout 600 docker pull python:3.12-slim >/dev/null
+          bash scripts/ci-docker-build.sh host-review -- --build-arg "SOURCE_REVISION=$GITHUB_SHA" --build-arg "SOURCE_TREE=$source_tree" \
+            -t nanoclaw-host:review "$host_context"
           docker image inspect --format '{{json .Config.Healthcheck}}' nanoclaw-host:review | grep -Fq deploy/healthcheck.mjs
           python3 scripts/privacy-image-audit.py --image nanoclaw-host:review \
             --base-image node:22-slim --revision "$GITHUB_SHA" --tree "$source_tree"
-          docker build --quiet --build-arg "AGENT_RUNNER_LOCK_SHA256=$lock_sha" \
-            -t nanoclaw-agent-base:review "$base_context" >/dev/null
-          docker build --quiet --build-arg "BASE_IMAGE=nanoclaw-agent-base:review" \
+          bash scripts/ci-docker-build.sh agent-base-review -- --build-arg "AGENT_RUNNER_LOCK_SHA256=$lock_sha" \
+            -t nanoclaw-agent-base:review "$base_context"
+          bash scripts/ci-docker-build.sh agent-review -- --build-arg "BASE_IMAGE=nanoclaw-agent-base:review" \
             --build-arg "SOURCE_REVISION=$GITHUB_SHA" --build-arg "SOURCE_TREE=$source_tree" \
-            -t nanoclaw-agent:review "$agent_context" >/dev/null
+            -t nanoclaw-agent:review "$agent_context"
           python3 scripts/privacy-image-audit.py --image nanoclaw-agent:review \
             --base-image nanoclaw-agent-base:review --revision "$GITHUB_SHA" --tree "$source_tree"
-          docker build --quiet --build-arg "SOURCE_REVISION=$GITHUB_SHA" --build-arg "SOURCE_TREE=$source_tree" \
-            -t nanoclaw-brokers:review "$broker_context" >/dev/null
+          bash scripts/ci-docker-build.sh brokers-review -- --build-arg "SOURCE_REVISION=$GITHUB_SHA" --build-arg "SOURCE_TREE=$source_tree" \
+            -t nanoclaw-brokers:review "$broker_context"
           python3 scripts/privacy-image-audit.py --image nanoclaw-brokers:review \
             --base-image python:3.12-slim --revision "$GITHUB_SHA" --tree "$source_tree"
 
@@ -281,22 +285,22 @@ jobs:
           lock_sha="$(sha256sum "$base_context/agent-runner/bun.lock" | cut -d' ' -f1)"
           source_tree="$(git rev-parse 'HEAD^{tree}')"
           source_label="org.opencontainers.image.source=https://github.com/olaClaw/nanoclaw"
-          docker pull node:22-slim >/dev/null
-          docker pull python:3.12-slim >/dev/null
-          docker build --quiet --label "$source_label" --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
-            --build-arg "SOURCE_TREE=$source_tree" -t nanoclaw-host:publish "$host_context" >/dev/null
+          timeout 600 docker pull node:22-slim >/dev/null
+          timeout 600 docker pull python:3.12-slim >/dev/null
+          bash scripts/ci-docker-build.sh host-publish -- --label "$source_label" --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
+            --build-arg "SOURCE_TREE=$source_tree" -t nanoclaw-host:publish "$host_context"
           docker image inspect --format '{{json .Config.Healthcheck}}' nanoclaw-host:publish | grep -Fq deploy/healthcheck.mjs
           python3 scripts/privacy-image-audit.py --image nanoclaw-host:publish \
             --base-image node:22-slim --revision "$GITHUB_SHA" --tree "$source_tree"
-          docker build --quiet --build-arg "AGENT_RUNNER_LOCK_SHA256=$lock_sha" \
-            -t nanoclaw-agent-base:publish "$base_context" >/dev/null
-          docker build --quiet --label "$source_label" --build-arg "BASE_IMAGE=nanoclaw-agent-base:publish" \
+          bash scripts/ci-docker-build.sh agent-base-publish -- --build-arg "AGENT_RUNNER_LOCK_SHA256=$lock_sha" \
+            -t nanoclaw-agent-base:publish "$base_context"
+          bash scripts/ci-docker-build.sh agent-publish -- --label "$source_label" --build-arg "BASE_IMAGE=nanoclaw-agent-base:publish" \
             --build-arg "SOURCE_REVISION=$GITHUB_SHA" --build-arg "SOURCE_TREE=$source_tree" \
-            -t nanoclaw-agent:publish "$agent_context" >/dev/null
+            -t nanoclaw-agent:publish "$agent_context"
           python3 scripts/privacy-image-audit.py --image nanoclaw-agent:publish \
             --base-image nanoclaw-agent-base:publish --revision "$GITHUB_SHA" --tree "$source_tree"
-          docker build --quiet --label "$source_label" --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
-            --build-arg "SOURCE_TREE=$source_tree" -t nanoclaw-brokers:publish "$broker_context" >/dev/null
+          bash scripts/ci-docker-build.sh brokers-publish -- --label "$source_label" --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
+            --build-arg "SOURCE_TREE=$source_tree" -t nanoclaw-brokers:publish "$broker_context"
           python3 scripts/privacy-image-audit.py --image nanoclaw-brokers:publish \
             --base-image python:3.12-slim --revision "$GITHUB_SHA" --tree "$source_tree"
       - name: Publish private GHCR candidates and create immutable manifest
