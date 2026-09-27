@@ -96,7 +96,7 @@ while import/export is missing.
   server console/log; a web setup page creates the administrator only with
   that code, which expires on use or after a few minutes. The console command
   stays the recovery path.
-- **Release updates recreate the dashboard services**: `compose-release-update.py`
-  recreates only the core services, so `dashboard` keeps the previous host
-  image until recreated. Recreate `dashboard` (and check `proxy`) when the
-  profile is enabled, including in the rollback.
+- **Release updates recreate the dashboard** (done): `compose-release-update.py`
+  recreates `dashboard` on the new host image when the profile is in use, and
+  on the old one during a rollback. `proxy` image bumps still need a manual
+  pull and recreate.

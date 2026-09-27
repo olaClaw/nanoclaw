@@ -135,7 +135,7 @@ class ComposeReleaseUpdateTests(unittest.TestCase):
                         return ''
                     return head[0]
 
-                def fake_compose(_project, *args):
+                def fake_compose(_project, *args, **_options):
                     calls.append(args)
                     if (fail_host and args[0] == 'up' and
                             args[-1] == 'nanoclaw' and head[0] == new['revision']):
@@ -529,6 +529,81 @@ class JobStateTests(unittest.TestCase):
             (root / UPDATE.JOB_FILE).chmod(0o644)
             with self.assertRaisesRegex(UPDATE.UpdateError, 'job_state_unsafe'):
                 UPDATE.job_status(root)
+
+
+class DashboardRefreshTests(unittest.TestCase):
+    def context(self, root):
+        project, state = root / 'project', root / 'state'
+        (state / 'data').mkdir(parents=True)
+        project.mkdir()
+        old = manifest('a' * 40, 'b' * 40, 'old')
+        new = manifest('c' * 40, 'd' * 40, 'new')
+        for name in ('onecli', 'postgres', 'signal'):
+            new['images'][name] = old['images'][name]
+        controls = (project / '.env', state / 'release.json', state / 'data/upgrade-state.json')
+        env = ''.join(f'{key}={old["images"][name]}\n' for name, key in UPDATE.IMAGE_KEYS.items())
+        controls[0].write_text(env + 'NANOCLAW_INSTALL_ID=synthetic\n')
+        controls[1].write_text(json.dumps(old))
+        controls[2].write_text(json.dumps({'version': '2.4.0', 'commit': old['revision'], 'tree': old['tree']}))
+        for path in controls:
+            os.chmod(path, 0o600)
+        old_bytes = {path: path.read_bytes() for path in controls}
+        metadata = {path: path.stat() for path in controls}
+        return (project, controls, old_bytes, metadata, old, json.dumps(new).encode(), new, project.stat(),
+                {'NANOCLAW_INSTALL_ID': 'synthetic'}, state, False), old, new
+
+    def run_update(self, enabled, fail_host=False):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            context, old, new = self.context(root)
+            head = [old['revision']]
+            calls = []
+
+            def fake_git(_project, *args, owner=None):
+                if args[:2] == ('switch', '--detach'):
+                    head[0] = args[-1]
+                if args == ('rev-parse', 'HEAD^{tree}'):
+                    return old['tree'] if head[0] == old['revision'] else new['tree']
+                if args == ('status', '--porcelain'):
+                    return ''
+                return head[0]
+
+            def fake_compose(_project, *args, profiles=(), **_options):
+                calls.append((args, tuple(profiles), head[0]))
+                if args[:2] == ('ps', '-q') and 'dashboard' in args:
+                    return 'container-id' if enabled else ''
+                if fail_host and args[0] == 'up' and args[-1] == 'nanoclaw' and head[0] == new['revision']:
+                    raise UPDATE.UpdateError('simulated_host_failure')
+                return ''
+
+            output = io.StringIO()
+            with (patch.object(UPDATE, 'git', side_effect=fake_git),
+                  patch.object(UPDATE, 'compose', side_effect=fake_compose),
+                  patch.object(UPDATE, 'no_agents'),
+                  patch.object(UPDATE, 'service_health'),
+                  redirect_stdout(output)):
+                try:
+                    UPDATE.apply_update(context, root)
+                except UPDATE.UpdateError:
+                    pass
+            recreated = [(profiles, rev) for args, profiles, rev in calls
+                         if args[0] == 'up' and args[-1] == 'dashboard']
+            return recreated, output.getvalue(), old, new
+
+    def test_enabled_dashboard_follows_the_new_host_image(self):
+        recreated, output, _, new = self.run_update(enabled=True)
+        self.assertEqual(recreated, [(('dashboard',), new['revision'])])
+        self.assertIn('dashboard_recreated=yes', output)
+
+    def test_disabled_dashboard_is_left_alone(self):
+        recreated, output, _, _ = self.run_update(enabled=False)
+        self.assertEqual(recreated, [])
+        self.assertNotIn('dashboard_recreated', output)
+
+    def test_rollback_returns_the_dashboard_to_the_old_image(self):
+        recreated, output, old, _ = self.run_update(enabled=True, fail_host=True)
+        self.assertEqual(recreated, [(('dashboard',), old['revision'])])
+        self.assertIn('rollback=healthy', output)
 
 
 if __name__ == '__main__':

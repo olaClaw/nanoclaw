@@ -87,6 +87,14 @@ update, save its key in the password manager, and remove the key from the host
 once the update has been checked. Plan a short maintenance window: the host is
 stopped for the recreate and the per-group image rebuild.
 
+## Dashboard
+
+When the opt-in `dashboard` profile is in use (its container exists), the
+update recreates the `dashboard` service after the host is healthy, since it
+runs the host image, and the rollback recreates it on the previous image. The
+`proxy` service is not touched: its image is pinned in `compose.yaml`, and a
+change to it needs its own pull and recreate.
+
 ## Job state
 
 Every run, preflight-only or `--apply`, records its state in the control
@@ -105,7 +113,7 @@ start time). No paths, identities, values or command output.
 
 | Field | Values |
 | --- | --- |
-| `phase` | `preflight`, `control_backup`, `stop_host`, `switch_release`, `start_services`, `wait_channels`, `refresh_images`, `rollback` |
+| `phase` | `preflight`, `control_backup`, `stop_host`, `switch_release`, `start_services`, `wait_channels`, `refresh_images`, `refresh_dashboard`, `rollback` |
 | `outcome` | `running`, `preflight_ok`, `succeeded`, `failed` (nothing changed), `rolled_back`, `rollback_failed`, `interrupted` |
 | `rollback` | empty, `not_needed`, `healthy`, `failed_manual_recovery_needed` |
 

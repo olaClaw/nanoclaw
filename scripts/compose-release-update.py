@@ -97,9 +97,28 @@ def git(project, *args, owner=None):
                    timeout=60)
 
 
-def compose(project, *args, timeout=600):
+def compose(project, *args, timeout=600, profiles=()):
+    extra = [flag for name in profiles for flag in ('--profile', name)]
     return command(['docker', 'compose', '-f', str(project / 'compose.yaml'),
-                    '--profile', RECOVERY.PROFILE, *args], cwd=project, timeout=timeout)
+                    '--profile', RECOVERY.PROFILE, *extra, *args], cwd=project, timeout=timeout)
+
+
+DASHBOARD_PROFILE = ('dashboard',)
+
+
+def dashboard_enabled(project):
+    """True when the opt-in dashboard container exists; it then follows the host image."""
+    try:
+        return bool(compose(project, 'ps', '-q', '--all', 'dashboard', profiles=DASHBOARD_PROFILE))
+    except UpdateError:
+        return False  # a checkout without the dashboard service
+
+
+def recreate_dashboard(project):
+    # Same image as the host: recreate it after every host image change, and
+    # after a rollback, so the panel never runs another release than the host.
+    compose(project, 'up', '-d', '--wait', '--no-deps', '--no-build', '--pull', 'never',
+            '--force-recreate', 'dashboard', profiles=DASHBOARD_PROFILE)
 
 
 def regular_private(path, owner):
@@ -621,6 +640,7 @@ def apply_update(context, backup_root, job=None):
                   tree=target['tree'], updatedAt=datetime.now(timezone.utc).isoformat(),
                   via='compose-release-update')
     next_marker = (json.dumps(marker, indent=2) + '\n').encode('utf-8')
+    dashboard = dashboard_enabled(project)
     job.phase('control_backup')
     control_backup(backup_root, current_bytes, controls)
     stop_attempted = False
@@ -655,6 +675,10 @@ def apply_update(context, backup_root, job=None):
             job.phase('refresh_images')
             refresh_derived_images(project, state, target, since)
             service_health(project)
+        if dashboard:
+            job.phase('refresh_dashboard')
+            recreate_dashboard(project)
+            print('dashboard_recreated=yes', flush=True)
         print('release_update=healthy', flush=True)
     except Exception as error:
         category = error_category(error)
@@ -686,6 +710,8 @@ def apply_update(context, backup_root, job=None):
             compose(project, 'up', '-d', '--wait', '--no-deps', '--no-build', '--pull',
                     'never', '--force-recreate', 'nanoclaw')
             service_health(project)
+            if dashboard:
+                recreate_dashboard(project)
             print('rollback=healthy', flush=True)
             job.failed(category, 'healthy')
         except Exception:
