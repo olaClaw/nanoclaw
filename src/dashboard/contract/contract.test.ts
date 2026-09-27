@@ -5,7 +5,7 @@ import { closeDb, getDb, initTestDb } from '../../db/connection.js';
 import { runMigrations } from '../../db/migrations/index.js';
 import { ENDPOINTS, PATH_PARAMS, agentList, errorResponse, job, loginRequest } from './api.js';
 import { POLICIES, policyDrift } from './authorization.js';
-import { CANARIES, findLeaks } from '../testing/canaries.js';
+import { CANARIES, findLeaks } from '../fixtures/canaries.js';
 import { EXAMPLES } from './examples.js';
 import { publicId, resolvePublicId } from './opaque-id.js';
 import {
@@ -20,7 +20,7 @@ import {
   minuteTimestamp,
   validate,
 } from './schema.js';
-import { EXPECTED, SYNTHETIC, seedSyntheticInstall } from '../testing/synthetic-install.js';
+import { EXPECTED, SYNTHETIC, seedSyntheticInstall } from '../fixtures/synthetic-install.js';
 
 /**
  * Field names that would mean a raw runtime value is being passed through.

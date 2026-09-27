@@ -62,7 +62,7 @@ fields the contract does not allow.
 | T17 | Clickjacking and content injection | `frame-ancestors 'none'`, strict CSP, no inline scripts in the real UI, printable-only strings in every response | D2/D3 header tests; schema `not_printable` |
 | T18 | Browser caching of private data | `Cache-Control: no-store` on every API response | D1 tests |
 | T19 | Exposure beyond LAN/VPN | NPM publishes 443 on the LAN/VPN interface only; NPM admin never broadly published; DNS-01 without port 80 | D8 checks on the target host |
-| T20 | Private data in images, CI artifacts or the repo | Synthetic fixtures with reserved values only; privacy source gate; image audit | Privacy gate in CI; fixtures in `src/dashboard/testing/` |
+| T20 | Private data in images, CI artifacts or the repo | Synthetic fixtures with reserved values only; privacy source gate; image audit | Privacy gate in CI; fixtures in `src/dashboard/fixtures/` |
 
 ## Out of scope for v1
 

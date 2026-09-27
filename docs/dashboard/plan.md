@@ -31,7 +31,7 @@ Companion documents in this directory:
 - **D0 done:** the API contract lives in `src/dashboard/contract/` (strict
   schemas, endpoint list, authorization matrix, HMAC public IDs, one example
   per endpoint) with synthetic fixtures and canaries in
-  `src/dashboard/testing/`, and the threat model in
+  `src/dashboard/fixtures/`, and the threat model in
   [threat-model.md](threat-model.md). No dashboard service, host boundary or
   authentication exists yet.
 
@@ -188,4 +188,4 @@ repository README.
 | 2026-09-27 | Consolidated dashboard decisions and implementation boundary in the new fork; no runtime, server, image or credential changed. | Complete post-migration checks, then begin the read-only security vertical slice on a separate branch. |
 | 2026-09-27 | Added a public, release-verified installation/configuration guide as a whole-stack deliverable, including tested legacy-to-Compose and Compose-to-Compose migration procedures; no guide commands or runtime behavior changed. | Write and rehearse each supported guide path when the dashboard and installation flow stabilize. |
 | 2026-09-27 | Moved the dashboard plan, design, API contract, backlog/tests and static prototype into `docs/dashboard/`; owner is now Claude Code. No runtime, server, image or credential changed. | Persistent job state for the release-update controller, then D0–D2. |
-| 2026-09-27 | D0: contract in `src/dashboard/contract/` (dependency-free strict schema language, 25 endpoints with request/response schemas, authorization matrix, HMAC public IDs, examples), synthetic install and canaries in `src/dashboard/testing/`, threat model T1–T20. 25 contract tests. No runtime change. | D1/D2: host boundary and login. |
+| 2026-09-27 | D0: contract in `src/dashboard/contract/` (dependency-free strict schema language, 25 endpoints with request/response schemas, authorization matrix, HMAC public IDs, examples), synthetic install and canaries in `src/dashboard/fixtures/`, threat model T1–T20. 25 contract tests. No runtime change. | D1/D2: host boundary and login. |
