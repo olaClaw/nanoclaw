@@ -51,7 +51,8 @@ export const revision = str(40, /^[0-9a-f]{40}$/);
 export const version = str(32, /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/);
 /** Provider, model and channel type names are identifiers, not free text. */
 export const providerName = str(32, /^[a-z][a-z0-9-]{0,31}$/);
-export const modelName = str(128, /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$/);
+/** Model IDs like `vendor/model:tag`; never a URL or an address. */
+export const modelName = str(128, /^(?!.*\/\/)(?!.*\d+\.\d+\.\d+\.\d+)[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$/);
 export const channelType = str(32, /^[a-z][a-z0-9-]{0,31}$/);
 export const serviceName = str(32, /^[a-z][a-z0-9-]{0,31}$/);
 /** Private administrator-visible label; the projection trims and bounds it. */
@@ -150,7 +151,7 @@ export const agentList = page(agentSummary);
 
 export const agentDetail = object({
   ...agentSummaryFields,
-  created_at: timestamp,
+  created_at: nullable(timestamp),
   container: object({
     state: oneOf('running', 'stopped'),
     image: object({ derived: bool, current: bool, release_revision: nullable(revision) }),

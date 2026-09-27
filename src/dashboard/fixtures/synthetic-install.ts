@@ -54,7 +54,6 @@ export const EXPECTED = {
   agents: 2,
   channels: { signal: 2, telegram: 1, cli: 1 },
   sessions: { total: 4, active: 3, main: { active: 2, total: 3 }, helper: { active: 1, total: 1 } },
-  mixedModelSettings: true,
 } as const;
 
 export async function seedSyntheticInstall(): Promise<void> {

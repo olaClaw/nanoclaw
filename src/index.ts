@@ -5,7 +5,7 @@
  * start delivery polls, start sweep, handle shutdown.
  */
 import { backfillContainerConfigs } from './backfill-container-configs.js';
-import { CENTRAL_DB_PATH } from './config.js';
+import { CENTRAL_DB_PATH, DASHBOARD_ADMIN_SOCKET } from './config.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
 import {
   abortGatewaySessionObservers,
@@ -60,6 +60,8 @@ import './modules/index.js';
 import './cli/commands/index.js';
 import './cli/delivery-action.js';
 import { startCliServer, stopCliServer } from './cli/socket-server.js';
+import { startDashboardAdminSocket, stopDashboardAdminSocket } from './dashboard/host/admin-socket.js';
+import { liveHostSources, loadIdKey } from './dashboard/host/host-sources.js';
 
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
 import {
@@ -201,6 +203,11 @@ async function main(): Promise<void> {
   // 9. Start the `ncl` CLI socket server (data/ncl.sock).
   await startCliServer();
 
+  // 10. Dashboard administrative boundary, only when configured.
+  if (DASHBOARD_ADMIN_SOCKET) {
+    await startDashboardAdminSocket(DASHBOARD_ADMIN_SOCKET, liveHostSources(loadIdKey()));
+  }
+
   log.info('NanoClaw running');
 }
 
@@ -217,6 +224,7 @@ async function shutdown(signal: string): Promise<void> {
   stopDeliveryPolls();
   stopHostSweep();
   await stopCliServer();
+  await stopDashboardAdminSocket();
   try {
     await teardownChannelAdapters();
   } finally {
