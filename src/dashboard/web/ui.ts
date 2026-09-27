@@ -38,6 +38,24 @@ export const INDEX_HTML = `<!doctype html>
         <p id="login-message" class="message" role="alert"></p>
       </form>
     </div>
+    <div id="setup" class="login" hidden>
+      <form id="setup-form" class="card login-card" autocomplete="off">
+        <div class="brand dark">NanoClaw<small>Configurazione iniziale</small></div>
+        <p>Nessun amministratore configurato. Sul server, dalla cartella di NanoClaw, esegui:</p>
+        <code class="secret">docker compose --env-file .env --profile core-preview --profile dashboard exec dashboard node dist/dashboard/web/admin-cli.js setup-code</code>
+        <label class="field">Codice monouso
+          <input id="setup-code" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" required maxlength="24" />
+        </label>
+        <label class="field">Nuova password (almeno 12 caratteri)
+          <input id="setup-password" type="password" autocomplete="new-password" required minlength="12" maxlength="1024" />
+        </label>
+        <label class="field">Ripeti la password
+          <input id="setup-repeat" type="password" autocomplete="new-password" required minlength="12" maxlength="1024" />
+        </label>
+        <button class="primary" type="submit">Crea l'amministratore</button>
+        <p id="setup-message" class="message" role="alert"></p>
+      </form>
+    </div>
     <div id="app" class="shell" hidden>
       <aside>
         <div class="brand">NanoClaw<small>Console privata</small></div>
@@ -155,6 +173,10 @@ export const APP_JS = String.raw`'use strict';
   };
   const ERRORS = {
     invalid_credentials: 'Password errata.',
+    invalid_setup_code: 'Codice non valido o scaduto: generane uno nuovo dalla console.',
+    already_configured: 'L\'amministratore esiste già: accedi con la password.',
+    password_too_short: 'La password deve avere almeno 12 caratteri.',
+    password_too_long: 'La password è troppo lunga.',
     login_throttled: 'Troppi tentativi. Riprova più tardi.',
     unauthenticated: 'Sessione scaduta: accedi di nuovo.',
     not_implemented: 'Non ancora disponibile: arriverà con il servizio operativo.',
@@ -228,8 +250,17 @@ export const APP_JS = String.raw`'use strict';
     return { status: response.status, data, code };
   }
 
+  function showSetup() {
+    csrf = null;
+    $('app').hidden = true;
+    $('login').hidden = true;
+    $('setup').hidden = false;
+    $('setup-code').focus();
+  }
+
   function showLogin(text) {
     csrf = null;
+    $('setup').hidden = true;
     $('app').hidden = true;
     $('login').hidden = false;
     $('login-message').textContent = text || '';
@@ -238,6 +269,7 @@ export const APP_JS = String.raw`'use strict';
 
   function showApp() {
     $('login').hidden = true;
+    $('setup').hidden = true;
     $('app').hidden = false;
     render(current);
   }
@@ -614,11 +646,36 @@ export const APP_JS = String.raw`'use strict';
         $('login-message').textContent = ERRORS[result.code] || 'Accesso non riuscito.';
       }
     });
+    $('setup-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const message = $('setup-message');
+      const password = $('setup-password');
+      const repeat = $('setup-repeat');
+      if (password.value !== repeat.value) { message.textContent = 'Le due password non coincidono.'; return; }
+      const flat = $('setup-code').value.toUpperCase().replace(/[\s-]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1');
+      const code = flat.length === 16 ? flat.match(/.{4}/g).join('-') : flat;
+      const result = await api('POST', '/setup', { code, password: password.value });
+      password.value = '';
+      repeat.value = '';
+      if (result.status === 200) {
+        $('setup-code').value = '';
+        csrf = result.data.csrf_token;
+        showApp();
+        say('Amministratore creato. Salva la password nel password manager.');
+      } else {
+        message.textContent = ERRORS[result.code] || 'Configurazione non riuscita.';
+        if (result.code === 'already_configured') showLogin(ERRORS.already_configured);
+      }
+    });
     const session = await api('GET', '/session');
     if (session.status === 200) {
       csrf = session.data.csrf_token;
       showApp();
-    } else showLogin('');
+      return;
+    }
+    const setup = await api('GET', '/setup');
+    if (setup.status === 200 && setup.data.needed) showSetup();
+    else showLogin('');
   });
 })();
 `;

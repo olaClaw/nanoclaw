@@ -22,6 +22,11 @@ export interface AdminRecord {
   updated_at: string;
 }
 
+export interface SetupRecord {
+  code: string;
+  expires_at: string;
+}
+
 export interface ThrottleRecord {
   failures: number;
   locked_until: string | null;
@@ -101,6 +106,27 @@ export class DashboardState {
     const previous = this.admin();
     if (!previous) return;
     this.writeJson('admin.json', { ...previous, generation: previous.generation + 1, updated_at: now.toISOString() });
+  }
+
+  /** The pending first-run setup code, or null when none or expired. */
+  setupCode(now: Date): SetupRecord | null {
+    const record = this.readJson<SetupRecord>('setup.json');
+    if (!record || typeof record.code !== 'string' || !(Date.parse(record.expires_at) > now.getTime())) return null;
+    return record;
+  }
+
+  /** Reuse the pending code or create one; refused once an administrator exists. */
+  ensureSetupCode(now: Date, generate: () => string, lifetimeMs: number): SetupRecord {
+    if (this.admin()) throw new Error('an administrator already exists');
+    const current = this.setupCode(now);
+    if (current) return current;
+    const record = { code: generate(), expires_at: new Date(now.getTime() + lifetimeMs).toISOString() };
+    this.writeJson('setup.json', record);
+    return record;
+  }
+
+  clearSetupCode(): void {
+    fs.rmSync(this.file('setup.json'), { force: true });
   }
 
   throttle(): ThrottleRecord {

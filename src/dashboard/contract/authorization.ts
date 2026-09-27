@@ -4,7 +4,8 @@
  * The dashboard has a single administrator, so authorization is about *how
  * strongly* a request must be authenticated, not *who* may call it:
  *
- * - `anonymous`: only the health probe and the login itself.
+ * - `anonymous`: only the health probe, the login itself and first-run setup
+ *   (which needs a one-time code read on the server console).
  * - `session`: a valid, unexpired server-side session cookie.
  * - `reauth`: a session whose password was re-entered within the reauth window
  *   (design.md: secrets, channel changes, updates, backups, restores).
@@ -58,6 +59,8 @@ const dangerous = (changes: Partial<EndpointPolicy> = {}) => mutation({ auth: 'r
 export const POLICIES: Readonly<Record<string, EndpointPolicy>> = {
   health: { ...read, auth: 'anonymous', rateLimit: 'probe' },
   login: mutation({ auth: 'anonymous', csrf: false, confirm: false, rateLimit: 'login' }),
+  setup_state: { ...read, auth: 'anonymous', rateLimit: 'probe' },
+  setup: mutation({ auth: 'anonymous', csrf: false, confirm: false, rateLimit: 'login' }),
   session: read,
   logout: mutation({ confirm: false }),
   reauth: mutation({ confirm: false, rateLimit: 'login' }),

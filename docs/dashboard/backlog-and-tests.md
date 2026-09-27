@@ -90,8 +90,11 @@ while import/export is missing.
 
 ## Backlog added after the first deployment
 
-- **First-password setup code for new installs** (with the installation
-  guide; the operator agreed on 2026-09-27): on first start with no
+- **First-password setup code for new installs** (done 2026-09-27; the
+  installation guide must explain it step by step, as the operator asked:
+  where to run the command, what the code looks like, the 30-minute expiry
+  and how to get a new one, the throttle, what to do when the password is
+  lost, and why the page cannot be used without console access): on first start with no
   administrator, the service generates a one-time code shown only in the
   server console/log; a web setup page creates the administrator only with
   that code, which expires on use or after a few minutes. The console command
