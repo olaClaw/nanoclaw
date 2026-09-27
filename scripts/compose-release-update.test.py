@@ -2,12 +2,14 @@ import importlib.util
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -353,6 +355,180 @@ class DerivedImageRefreshTests(unittest.TestCase):
         calls, _, error = self.run_refresh([self.stale] * 5 + [{}] * 50, 'INFO NanoClaw running\n', wait=0)
         self.assertIsNotNone(error)
         self.assertIn('derived_image_not_refreshed', str(error))
+
+
+class JobStateTests(unittest.TestCase):
+    ARGS = dict(apply=True, confirm_production=True, acknowledge_interrupted=None)
+
+    def args(self, **changes):
+        return SimpleNamespace(**{**self.ARGS, **changes})
+
+    def run_job(self, root, *, preflight=None, on_apply=None, **changes):
+        old = manifest('a' * 40, 'b' * 40, 'old')
+        new = manifest('c' * 40, 'd' * 40, 'new')
+
+        def fake_preflight(_args, job):
+            job.release(old, new)
+            if preflight:
+                preflight()
+            return 'context'
+
+        def fake_apply(_context, _root, job):
+            job.phase('stop_host')
+            if on_apply:
+                on_apply(job)
+
+        output = io.StringIO()
+        with (patch.object(UPDATE, 'preflight', side_effect=fake_preflight),
+              patch.object(UPDATE, 'apply_update', side_effect=fake_apply),
+              redirect_stdout(output)):
+            try:
+                UPDATE.run(self.args(**changes), root)
+            except UPDATE.UpdateError:
+                pass
+        return UPDATE.job_status(root), output.getvalue()
+
+    def test_success_records_release_phases_and_private_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            record, output = self.run_job(root)
+            self.assertEqual(record['outcome'], 'succeeded')
+            self.assertEqual(record['to_revision'], 'c' * 40)
+            self.assertEqual([step['phase'] for step in record['phases']], ['preflight', 'stop_host'])
+            self.assertIsNone(record['failure_category'])
+            self.assertIn(f'job_id={record["job_id"]}', output)
+            self.assertEqual(stat.S_IMODE((root / UPDATE.JOB_FILE).stat().st_mode), 0o600)
+            self.assertEqual(set(record), {
+                'schema', 'job_id', 'mode', 'apply', 'from_revision', 'to_revision', 'to_version',
+                'phase', 'outcome', 'failure_category', 'rollback', 'started_utc', 'updated_utc',
+                'finished_utc', 'phases'})
+
+    def test_failures_map_rollback_to_outcome(self):
+        def failing(rollback):
+            def apply(job):
+                job.failed('derived_image_not_refreshed', rollback)
+                raise UPDATE.UpdateError('update_failed')
+            return apply
+
+        for rollback, outcome in (('healthy', 'rolled_back'),
+                                  ('failed_manual_recovery_needed', 'rollback_failed'),
+                                  ('not_needed', 'failed')):
+            with self.subTest(rollback=rollback), tempfile.TemporaryDirectory() as temp:
+                record, _ = self.run_job(Path(temp), on_apply=failing(rollback))
+                self.assertEqual((record['outcome'], record['rollback'], record['failure_category']),
+                                 (outcome, rollback, 'derived_image_not_refreshed'))
+
+    def test_preflight_failure_and_preflight_only(self):
+        def refuse():
+            raise UPDATE.UpdateError('backup_too_old')
+
+        with tempfile.TemporaryDirectory() as temp:
+            record, _ = self.run_job(Path(temp), preflight=refuse)
+            self.assertEqual((record['outcome'], record['phase'], record['failure_category']),
+                             ('failed', 'preflight', 'backup_too_old'))
+            record, output = self.run_job(Path(temp), apply=False)
+            self.assertEqual((record['outcome'], record['apply']), ('preflight_ok', False))
+            self.assertIn('release_update_mutation=disabled', output)
+            history = (Path(temp) / UPDATE.JOB_HISTORY).read_text().splitlines()
+            self.assertEqual([json.loads(line)['outcome'] for line in history], ['failed', 'preflight_ok'])
+
+    def test_unexpected_errors_never_record_their_message(self):
+        def leak():
+            raise RuntimeError('/private/path fixture-secret')
+
+        with tempfile.TemporaryDirectory() as temp:
+            try:
+                self.run_job(Path(temp), preflight=leak)
+            except RuntimeError:
+                pass
+            text = (Path(temp) / UPDATE.JOB_FILE).read_text()
+            self.assertIn('unexpected_error', text)
+            self.assertNotIn('fixture-secret', text)
+
+    def test_dead_run_is_interrupted_and_blocks_every_run(self):
+        def die(job):
+            job.phase('switch_release')
+            raise KeyboardInterrupt  # stands in for a killed process
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_job(root, on_apply=die)
+            dead = UPDATE.job_status(root)
+            self.assertEqual((dead['outcome'], dead['phase']), ('interrupted', 'switch_release'))
+            for apply in (True, False):
+                with self.subTest(apply=apply), patch.object(UPDATE, 'preflight') as preflight:
+                    with self.assertRaisesRegex(UPDATE.UpdateError, 'previous_update_interrupted'):
+                        UPDATE.run(self.args(apply=apply), root)
+                    preflight.assert_not_called()
+            self.assertEqual(UPDATE.job_status(root)['job_id'], dead['job_id'])
+            self.assertFalse((root / UPDATE.JOB_HISTORY).exists())
+
+    def test_acknowledged_interrupted_run_allows_apply(self):
+        def die(job):
+            job.phase('start_services')
+            raise KeyboardInterrupt
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_job(root, on_apply=die)
+            dead = UPDATE.job_status(root)
+            with self.assertRaisesRegex(UPDATE.UpdateError, 'previous_update_interrupted'):
+                UPDATE.run(self.args(acknowledge_interrupted='0' * 16), root)
+            record, _ = self.run_job(root, acknowledge_interrupted=dead['job_id'])
+            self.assertEqual(record['outcome'], 'succeeded')
+            history = [json.loads(line) for line in (root / UPDATE.JOB_HISTORY).read_text().splitlines()]
+            self.assertEqual([(item['job_id'], item['outcome']) for item in history],
+                             [(dead['job_id'], 'interrupted'), (record['job_id'], 'succeeded')])
+
+    def test_run_that_died_in_preflight_does_not_block(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            UPDATE.Job(root, mode='production', apply=True).save()
+            record, _ = self.run_job(root)
+            self.assertEqual(record['outcome'], 'succeeded')
+
+    def test_status_sees_a_live_run_and_the_lock_is_exclusive(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.assertIsNone(UPDATE.job_status(root))
+            job = UPDATE.Job(root, mode='production', apply=True)
+            job.save()
+            fd = os.open(root / UPDATE.LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                UPDATE.acquire_lock(fd)
+                self.assertEqual(UPDATE.job_status(root)['outcome'], 'running')
+                other = os.open(root / UPDATE.LOCK_FILE, os.O_RDWR)
+                try:
+                    with self.assertRaisesRegex(UPDATE.UpdateError, 'update_already_running'):
+                        UPDATE.acquire_lock(other, attempts=2)
+                finally:
+                    os.close(other)
+            finally:
+                os.close(fd)
+            self.assertEqual(UPDATE.job_status(root)['outcome'], 'interrupted')
+
+    def test_state_write_failure_does_not_stop_the_run(self):
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp, redirect_stdout(output):
+            job = UPDATE.Job(Path(temp) / 'missing', mode='production', apply=True)
+            job.save()
+            job.phase('stop_host')
+            job.finish('succeeded')
+        self.assertEqual(output.getvalue().count('job_state=write_failed'), 1)
+
+    def test_history_is_bounded_and_unsafe_state_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with redirect_stdout(io.StringIO()):
+                for _ in range(UPDATE.JOB_HISTORY_LIMIT + 5):
+                    UPDATE.Job(root, mode='synthetic', apply=False).finish('preflight_ok')
+            lines = (root / UPDATE.JOB_HISTORY).read_text().splitlines()
+            self.assertEqual(len(lines), UPDATE.JOB_HISTORY_LIMIT)
+            (root / UPDATE.JOB_FILE).chmod(0o644)
+            with self.assertRaisesRegex(UPDATE.UpdateError, 'job_state_unsafe'):
+                UPDATE.job_status(root)
 
 
 if __name__ == '__main__':
