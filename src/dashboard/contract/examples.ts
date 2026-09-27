@@ -149,7 +149,7 @@ export const EXAMPLES: Readonly<Record<string, unknown>> = {
   },
   job: updateJob,
 
-  restart_agent: accepted('restart_agent'),
+  restart_agent: { agent: AGENT_MAIN, restarted: 1 },
   channel_state: accepted('channel_state'),
   secret: { kind: 'llm_api_key', configured: true, rotated_at: '2026-01-15T12:20:00Z' },
   model_preflight: {

@@ -35,6 +35,8 @@ export interface HostSources {
   release(): { version: string; revision: string } | null;
   defaults: { provider: string; model: string; endpointConfigured: boolean };
   now(): Date;
+  /** Restart the agent group's running containers; resolves to how many. */
+  restartAgent(internalId: string): Promise<number>;
 }
 
 /** Providers whose model endpoint the operator configures on the LAN. */

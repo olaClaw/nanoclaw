@@ -72,7 +72,20 @@ async function resolveAgent(publicAgentId: string, sources: HostSources): Promis
   return internal;
 }
 
+/** Agents with a restart in flight; a second request waits for the first to finish. */
+const restarting = new Set<string>();
+
 const HANDLERS: Readonly<Record<string, Handler>> = {
+  restart_agent: async ({ sources, params }) => {
+    const internal = await resolveAgent(params.agent, sources);
+    if (restarting.has(internal)) throw new BoundaryError(409, 'restart_in_progress');
+    restarting.add(internal);
+    try {
+      return { agent: params.agent, restarted: await sources.restartAgent(internal) };
+    } finally {
+      restarting.delete(internal);
+    }
+  },
   overview: async ({ sources }) => {
     const overview = await getOverview(sources);
     if (!overview) throw new BoundaryError(503, 'release_unknown');

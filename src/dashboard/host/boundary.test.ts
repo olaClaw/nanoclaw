@@ -30,6 +30,7 @@ function sources(changes: Partial<HostSources> = {}): HostSources {
     release: () => ({ version: '2.4.0', revision: 'a'.repeat(40) }),
     defaults: { provider: 'opencode', model: 'fixture-model-a', endpointConfigured: true },
     now: () => new Date('2026-01-15T12:34:56.789Z'),
+    restartAgent: async () => 1,
     ...changes,
   };
 }
@@ -158,6 +159,48 @@ describe('read-only projections over the synthetic install', () => {
   });
 });
 
+describe('agent restart', () => {
+  it('restarts the resolved internal agent and answers within the contract', async () => {
+    const calls: string[] = [];
+    const host = sources({ restartAgent: async (id) => (calls.push(id), 2) });
+    const target = endpoint('restart_agent').path.replace('{agent}', mainId);
+    const response = await handleAdminRequest({ method: 'POST', target, body: { confirm: true } }, host);
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ agent: mainId, restarted: 2 });
+    expect(validate(endpoint('restart_agent').response!, response.body)).toEqual([]);
+    expect(calls).toEqual([SYNTHETIC.agents.main.id]);
+    expect(findLeaks(JSON.stringify(response.body))).toEqual([]);
+  });
+
+  it('refuses unknown agents and a second restart of the same agent while one runs', async () => {
+    const unknown = endpoint('restart_agent').path.replace('{agent}', 'agt_' + '0'.repeat(32));
+    expect(
+      (await handleAdminRequest({ method: 'POST', target: unknown, body: { confirm: true } }, sources())).status,
+    ).toBe(404);
+    let release!: () => void;
+    const slow = sources({ restartAgent: () => new Promise((resolve) => (release = () => resolve(1))) });
+    const target = endpoint('restart_agent').path.replace('{agent}', mainId);
+    const first = handleAdminRequest({ method: 'POST', target, body: { confirm: true } }, slow);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const second = await handleAdminRequest({ method: 'POST', target, body: { confirm: true } }, slow);
+    expect((second.body as { error: { code: string } }).error.code).toBe('restart_in_progress');
+    release();
+    expect((await first).status).toBe(200);
+  });
+
+  it('reports a failed restart as an error without detail', async () => {
+    const failing = sources({
+      restartAgent: async () => {
+        throw new Error('docker said /srv/nanoclaw/secret');
+      },
+    });
+    const target = endpoint('restart_agent').path.replace('{agent}', mainId);
+    const response = await handleAdminRequest({ method: 'POST', target, body: { confirm: true } }, failing);
+    expect(response.status).toBe(500);
+    expect(findLeaks(JSON.stringify(response.body))).toEqual([]);
+  });
+});
+
 describe('boundary rules', () => {
   it('refuses unknown routes, wrong methods and dashboard-local endpoints', async () => {
     expect((await get('/api/v1/nope')).status).toBe(404);
@@ -204,7 +247,7 @@ describe('boundary rules', () => {
     expect(
       (await handleAdminRequest({ method: 'POST', target, body: { confirm: true, extra: 1 } }, sources())).status,
     ).toBe(400);
-    expect((await handleAdminRequest({ method: 'POST', target, body: { confirm: true } }, sources())).status).toBe(501);
+    expect((await handleAdminRequest({ method: 'POST', target, body: { confirm: true } }, sources())).status).toBe(200);
     expect(
       (await handleAdminRequest({ method: 'GET', target: '/api/v1/agents', body: { a: 1 } }, sources())).status,
     ).toBe(400);

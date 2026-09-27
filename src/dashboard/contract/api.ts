@@ -217,6 +217,8 @@ export const backupList = page(
 
 export const empty = object({});
 export const restartAgentRequest = object({ confirm: confirmed });
+/** Restarts are quick (kill, then respawn if work is pending), so the answer is direct. */
+export const restartAgentResult = object({ agent: agentId, restarted: COUNT });
 export const channelStateRequest = object({ enabled: bool, confirm: confirmed });
 
 /**
@@ -404,7 +406,7 @@ export const ENDPOINTS: readonly Endpoint[] = [
     method: 'POST',
     path: '/api/v1/agents/{agent}/restart',
     request: restartAgentRequest,
-    response: jobAccepted,
+    response: restartAgentResult,
     status: 'v1',
     epic: 'D6',
   },
