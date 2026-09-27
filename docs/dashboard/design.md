@@ -85,8 +85,10 @@ The shared plan with current state and next step is [plan.md](plan.md).
 
 - Bootstrap the administrator with an interactive local command, not through
   an open web endpoint. The password never goes through shell arguments,
-  `.env`, logs or images. Store only an adaptive hash with a unique salt
-  (Argon2id).
+  `.env`, logs or images. Store only an adaptive hash with a unique salt:
+  scrypt (N=2^17, r=8, p=1), chosen by the operator on 2026-09-27 because
+  Node 22 has no built-in Argon2id; the versioned record allows a later
+  Argon2id rehash at login.
 - Limit and slow down login attempts; identical errors for wrong credentials.
   Provide a local unlock procedure.
 - Revocable server-side sessions, random IDs, idle timeout and maximum

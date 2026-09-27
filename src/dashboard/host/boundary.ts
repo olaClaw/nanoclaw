@@ -15,7 +15,7 @@
 import { randomBytes } from 'crypto';
 
 import { log } from '../../log.js';
-import { ENDPOINTS, PATH_PARAMS, errorResponse, type Endpoint } from '../contract/api.js';
+import { PATH_PARAMS, errorResponse, matchEndpoint, type Endpoint } from '../contract/api.js';
 import { resolvePublicId } from '../contract/opaque-id.js';
 import { validate } from '../contract/schema.js';
 import {
@@ -93,22 +93,11 @@ function newRequestId(): string {
   return `req_${randomBytes(8).toString('hex')}`;
 }
 
-function templateRegex(path: string): RegExp {
-  const pattern = path.replace(/\{([a-z]+)\}/g, (_, name: string) => `(?<${name}>[^/]+)`);
-  return new RegExp(`^${pattern}$`);
-}
-
-const ROUTES = ENDPOINTS.map((endpoint) => ({ endpoint, regex: templateRegex(endpoint.path) }));
-
 function match(method: string, path: string): { endpoint: Endpoint; params: Record<string, string> } {
-  let pathMatched = false;
-  for (const route of ROUTES) {
-    const found = route.regex.exec(path);
-    if (!found) continue;
-    pathMatched = true;
-    if (route.endpoint.method === method) return { endpoint: route.endpoint, params: { ...found.groups } };
-  }
-  throw new BoundaryError(pathMatched ? 405 : 404, pathMatched ? 'method_not_allowed' : 'not_found');
+  const found = matchEndpoint(method, path);
+  if (found === 'not_found') throw new BoundaryError(404, 'not_found');
+  if (found === 'method_not_allowed') throw new BoundaryError(405, 'method_not_allowed');
+  return found;
 }
 
 function parseTarget(target: string): { path: string; query: URLSearchParams } {

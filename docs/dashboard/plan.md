@@ -41,14 +41,24 @@ Companion documents in this directory:
   public IDs server-side and answers `not_implemented` for operations that
   need the root-side operations service (releases, backups, jobs,
   mutations).
+- **D2 done:** the dashboard web service in `src/dashboard/web/` handles
+  login with scrypt (chosen by the operator over Argon2id, which Node 22 lacks;
+  versioned format for a later rehash), in-memory server-side sessions
+  (`__Host-` cookie, 30 min idle, 8 h absolute, generation-based revocation),
+  a persistent global login throttle, Origin/`Sec-Fetch-Site`/CSRF checks, a
+  5-minute reauth window, per-session rate limits, an audit log (endpoint,
+  status, request ID) and forwarding to the host boundary with a second
+  contract check. `admin-cli.js` sets the password from the console, revokes
+  sessions and clears the throttle. Not yet in Compose.
 
 ## Next step
 
-D2: the dashboard service itself, a separate web process that talks to the host
-only through the admin socket. It holds password login (hash and rate limit),
-server-side sessions, CSRF and Origin checks and the reauth window, and
-forwards authorized calls to the boundary. Then add it to Compose with the
-socket directory as its only mount, and rehearse on the test LXC.
+Compose integration and rehearsal: add the `dashboard` service (the host image
+with the `dist/dashboard/web/main.js` entry point, its own UID, a private state
+directory and the admin socket directory as its only mounts, no port on the
+host), set `NANOCLAW_DASHBOARD_ADMIN_SOCKET` for the host, build a release and
+rehearse login and the read-only API on the test LXC. Then D8 (NPM/HTTPS) and
+D3 (the read-only screens).
 
 ## Agreed product behavior
 
@@ -197,3 +207,4 @@ repository README.
 | 2026-09-27 | Moved the dashboard plan, design, API contract, backlog/tests and static prototype into `docs/dashboard/`; owner is now Claude Code. No runtime, server, image or credential changed. | Persistent job state for the release-update controller, then D0–D2. |
 | 2026-09-27 | D0: contract in `src/dashboard/contract/` (dependency-free strict schema language, 25 endpoints with request/response schemas, authorization matrix, HMAC public IDs, examples), synthetic install and canaries in `src/dashboard/fixtures/`, threat model T1–T20. 25 contract tests. No runtime change. | D1/D2: host boundary and login. |
 | 2026-09-27 | D1: host boundary over a Unix socket (HTTP framing, 64 KiB bodies, 15 s timeouts, `no-store`), read-only projections, per-install public-ID key in `data/dashboard/`, off unless `NANOCLAW_DASHBOARD_ADMIN_SOCKET` is set. 17 new tests (canaries, tampering, framing, key file). | D2: dashboard service and login. |
+| 2026-09-27 | D2: dashboard web service (auth, sessions, throttle, CSRF/Origin, reauth, audit, forwarding) and the local admin CLI; scrypt by operator decision. 19 new tests, including end to end over the real admin socket and the synthetic install. Fixed a keep-alive bug on refused uploads (413 now closes the connection) in both the service and the host socket. | Compose integration and test-LXC rehearsal. |

@@ -42,6 +42,9 @@ class FramingError extends Error {
 
 function readBody(request: http.IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
+    // Listen for errors first: a refused upload is cut off, and the aborted
+    // stream must not surface as an unhandled error.
+    request.on('error', () => reject(new FramingError(400, 'invalid_request')));
     const declared = Number(request.headers['content-length'] ?? 0);
     if (declared > MAX_BODY_BYTES) return reject(new FramingError(413, 'payload_too_large'));
     const chunks: Buffer[] = [];
@@ -52,7 +55,6 @@ function readBody(request: http.IncomingMessage): Promise<unknown> {
       if (size > MAX_BODY_BYTES) reject(new FramingError(413, 'payload_too_large'));
       else chunks.push(chunk);
     });
-    request.on('error', () => reject(new FramingError(400, 'invalid_request')));
     request.on('end', () => {
       if (size === 0) return resolve(undefined);
       const type = String(request.headers['content-type'] ?? '');

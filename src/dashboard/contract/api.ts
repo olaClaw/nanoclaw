@@ -494,3 +494,26 @@ export function endpoint(name: string): Endpoint {
   if (!found) throw new Error(`unknown dashboard endpoint: ${name}`);
   return found;
 }
+
+const ROUTES = ENDPOINTS.map((item) => ({
+  endpoint: item,
+  regex: new RegExp(`^${item.path.replace(/\{([a-z]+)\}/g, (_, name: string) => `(?<${name}>[^/]+)`)}$`),
+}));
+
+/**
+ * The endpoint for a method and path, with its raw path parameters, or why
+ * none matches. Parameters still need validation against PATH_PARAMS.
+ */
+export function matchEndpoint(
+  method: string,
+  path: string,
+): { endpoint: Endpoint; params: Record<string, string> } | 'not_found' | 'method_not_allowed' {
+  let pathMatched = false;
+  for (const route of ROUTES) {
+    const found = route.regex.exec(path);
+    if (!found) continue;
+    pathMatched = true;
+    if (route.endpoint.method === method) return { endpoint: route.endpoint, params: { ...found.groups } };
+  }
+  return pathMatched ? 'method_not_allowed' : 'not_found';
+}
