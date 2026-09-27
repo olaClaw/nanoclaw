@@ -256,6 +256,8 @@ export const updateRequest = object({ release_revision: revision, confirm: confi
  */
 export const backupKey = object({ backup: backupId, key: str(64, /^[0-9a-f]{64}$/) });
 export const backupKeyState = object({ backup: backupId, key_on_host: bool });
+/** A deleted backup: archive and any key left on the server are gone. */
+export const backupDeleted = object({ backup: backupId, deleted: bool });
 export const backupCreateRequest = object({ confirm: confirmed });
 
 export type Overview = Infer<typeof overview>;
@@ -479,6 +481,15 @@ export const ENDPOINTS: readonly Endpoint[] = [
     path: '/api/v1/backups/{backup}/key',
     request: backupCreateRequest,
     response: backupKey,
+    status: 'v1',
+    epic: 'D4',
+  },
+  {
+    name: 'backup_delete',
+    method: 'POST',
+    path: '/api/v1/backups/{backup}/delete',
+    request: backupCreateRequest,
+    response: backupDeleted,
     status: 'v1',
     epic: 'D4',
   },

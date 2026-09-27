@@ -33,6 +33,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socket
 import socketserver
 import stat
@@ -311,6 +312,32 @@ class Sources:
         if path and self.key_on_host(folder):
             shred(path)
         return {'backup': public, 'key_on_host': False}
+
+    def delete_backup(self, public):
+        """Remove one backup (archive, manifest and any key still here); never the last one."""
+        if not self.running.acquire(blocking=False):
+            raise OpsError(409, 'operation_in_progress')
+        lock = None
+        try:
+            lock = os.open(self.control_root / LOCK_FILE, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise OpsError(409, 'operation_in_progress')
+            folder = self.resolve_backup(public)
+            if len(self.backup_folders()) <= 1:
+                raise OpsError(409, 'last_backup')
+            if folder.parent != self.backup_root or folder.is_symlink() or not folder.is_dir():
+                raise OpsError(409, 'backup_unsafe')
+            key = self.key_path(folder)
+            if key and self.key_on_host(folder):
+                shred(key)
+            shutil.rmtree(folder)
+            return {'backup': public, 'deleted': True}
+        finally:
+            if lock is not None:
+                os.close(lock)
+            self.running.release()
 
     def ops_job_path(self, job_id):
         return self.jobs_dir / f'{job_id}.json'
@@ -669,6 +696,14 @@ def handle(sources, method, target, body=None):
     query = parse_qsl(parts.query, keep_blank_values=True)
     path = parts.path
     key_match = re.fullmatch(r'/api/v1/backups/([^/]+)/key(/saved)?', path)
+    delete_match = re.fullmatch(r'/api/v1/backups/([^/]+)/delete', path)
+    if delete_match:
+        if method != 'POST':
+            raise OpsError(405, 'method_not_allowed')
+        if query:
+            raise OpsError(400, 'invalid_query')
+        confirmed(body)
+        return 200, sources.delete_backup(delete_match.group(1))
     job_match = re.fullmatch(r'/api/v1/jobs/([^/]+)', path)
     name = {'/api/v1/releases': 'releases', '/api/v1/backups': 'backups'}.get(path)
     if key_match:

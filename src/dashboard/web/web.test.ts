@@ -37,6 +37,7 @@ describe('operations routing', () => {
     expect([...OPS_ENDPOINTS].sort()).toEqual(
       [
         'backup_create',
+        'backup_delete',
         'backup_export',
         'backup_key',
         'backup_key_saved',

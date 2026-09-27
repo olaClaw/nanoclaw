@@ -223,7 +223,7 @@ describe('authorization matrix', () => {
     const locked = Object.entries(POLICIES)
       .filter(([, p]) => p.lock === 'maintenance')
       .map(([name]) => name);
-    expect(locked.sort()).toEqual(['backup_create', 'import_apply', 'model_apply', 'update']);
+    expect(locked.sort()).toEqual(['backup_create', 'backup_delete', 'import_apply', 'model_apply', 'update']);
   });
 
   it('asks for confirm: true exactly where the policy says so', () => {
