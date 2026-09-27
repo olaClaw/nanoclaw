@@ -67,12 +67,10 @@ Companion documents in this directory:
 
 ## Next step
 
-D8: Nginx Proxy Manager in front of the `dashboard` service on the Compose
-host, HTTPS on the LAN/VPN address only, DNS-01 certificate, NPM admin on
-loopback. Needs from the operator: subdomain (private), DNS provider token
-with minimal rights, confirmation that no router forward reaches the host.
-Then the root-side operations service (releases, backups, jobs), which the
-update and backup screens wait for.
+Install the operations service on the production host and check the Backup
+and Updates screens; then its first mutating operations (backup create and
+verify, release update from a verified candidate) on the same job/lock as
+the CLI, with reauth and confirmation, rehearsed on the test LXC first.
 
 ## Agreed product behavior
 
@@ -224,3 +222,4 @@ repository README.
 | 2026-09-27 | D2: dashboard web service (auth, sessions, throttle, CSRF/Origin, reauth, audit, forwarding) and the local admin CLI; scrypt by operator decision. 19 new tests, including end to end over the real admin socket and the synthetic install. Fixed a keep-alive bug on refused uploads (413 now closes the connection) in both the service and the host socket. | Compose integration and test-LXC rehearsal. |
 | 2026-09-27 | D3: read-only UI served by the dashboard service; structural tests (CSP, no inline code, no `innerHTML`/storage, fetch only to `/api/v1`) and a headless Chromium walk-through (wrong password, login, every screen, agent detail, logout; no console errors, cookie not readable by script). | D8 (HTTPS), then the operations service. |
 | 2026-09-27 | D8 Compose part: NPM proxy service, backup rule for Let's Encrypt links, docs; rehearsal over TLS on the test LXC. Production enablement waits for the operator (DNS record, NPM admin, DNS token in NPM only). | Release, then enable on the production host with the operator. |
+| 2026-09-27 | Operations service, read-only slice: `scripts/compose-ops.py` (root, Unix socket for group 61001; releases, backups, update jobs; HMAC backup IDs with the dashboard key), systemd unit `deploy/ops/nanoclaw-ops.service`, dashboard routes those endpoints to it and reports `ops_unavailable` when it is absent. Python tests plus a cross-language test (Python service behind the dashboard, validated by the TypeScript contract). | Install on the production host; then mutating operations. |

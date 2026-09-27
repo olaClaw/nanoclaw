@@ -49,11 +49,27 @@ const RATE_LIMITS: Readonly<Record<RateLimitClass, number>> = { read: 120, mutat
 
 export type Forward = (method: string, target: string, body: unknown) => Promise<{ status: number; body: unknown }>;
 
+/** Endpoints answered by the root-side operations service, when one is configured. */
+export const OPS_ENDPOINTS = new Set([
+  'releases',
+  'backups',
+  'job',
+  'update',
+  'backup_create',
+  'backup_verify',
+  'backup_export',
+  'import_preflight',
+  'import_apply',
+]);
+
 export interface DashboardConfig {
   state: DashboardState;
   /** Exact origin the browser uses, e.g. `https://panel.example.invalid`. */
   origin: string;
+  /** The host boundary. */
   forward: Forward;
+  /** The operations service; without it, its endpoints stay with `forward` (`not_implemented`). */
+  opsForward?: Forward;
   now?: () => number;
   scrypt?: ScryptParams;
 }
@@ -224,7 +240,14 @@ export function createDashboardServer(config: DashboardConfig): http.Server {
       return { reply: await local(endpoint, session, token, body), endpoint };
     }
 
-    const upstream = await config.forward(method, url.pathname + url.search, body);
+    const target = config.opsForward && OPS_ENDPOINTS.has(endpoint.name) ? config.opsForward : config.forward;
+    const upstream = await target(method, url.pathname + url.search, body).catch((error: unknown) => {
+      // The operations service is optional: when it is not running, say so.
+      if (target !== config.forward && error instanceof HttpError && error.code === 'upstream_unavailable') {
+        throw new HttpError(503, 'ops_unavailable');
+      }
+      throw error;
+    });
     const schema = upstream.status < 300 ? endpoint.response : errorResponse;
     const fits =
       schema === null

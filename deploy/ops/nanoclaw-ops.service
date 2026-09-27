@@ -1,0 +1,31 @@
+# Root-side operations service for the NanoClaw dashboard (read-only slice).
+# Install the script from a reviewed checkout (see docs/compose-preview.md),
+# then: systemctl daemon-reload && systemctl enable --now nanoclaw-ops
+[Unit]
+Description=NanoClaw dashboard operations service
+After=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/lib/nanoclaw/compose-ops.py serve \
+  --socket /var/lib/nanoclaw-ops/sock/ops.sock --socket-group 61001 \
+  --state-root /srv/nanoclaw \
+  --backup-root /var/lib/nanoclaw-ops/backups \
+  --control-backup-root /var/lib/nanoclaw-ops/release-backups \
+  --candidates /var/lib/nanoclaw-ops/candidates
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/nanoclaw-ops/sock
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
