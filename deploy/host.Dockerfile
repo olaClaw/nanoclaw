@@ -23,6 +23,9 @@ COPY deploy/release-manifest.mjs ./deploy/release-manifest.mjs
 COPY deploy/check-release.mjs ./deploy/check-release.mjs
 COPY deploy/bootstrap.mjs ./deploy/bootstrap.mjs
 RUN mkdir -p data groups store templates && chown -R node:node data groups store templates
+# Mount point of the volume holding the dashboard admin socket: a fresh named
+# volume copies this owner and mode (0750, group node for the dashboard).
+RUN mkdir -p /run/nanoclaw-admin && chown node:node /run/nanoclaw-admin && chmod 0750 /run/nanoclaw-admin
 ARG SOURCE_REVISION
 ARG SOURCE_TREE
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
