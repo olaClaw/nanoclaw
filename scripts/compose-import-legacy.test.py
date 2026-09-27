@@ -276,5 +276,136 @@ class SnapshotTests(unittest.TestCase):
                 self.assertNotIn(secret, result.stdout + result.stderr)
 
 
+# Options accepted by `docker compose <subcommand>` in Compose 5.5.1 (the target host's version).
+COMPOSE_OPTIONS = {
+    'config': {'--dry-run', '--environment', '--format', '--hash', '--images', '--lock-image-digests', '--models',
+               '--networks', '--no-consistency', '--no-env-resolution', '--no-interpolate', '--no-normalize',
+               '--no-path-resolution', '-o', '--output', '--profiles', '-q', '--quiet', '--resolve-image-digests',
+               '--services', '--variables', '--volumes'},
+    'create': {'--build', '--dry-run', '--force-recreate', '--no-build', '--no-recreate', '--pull', '--quiet-pull',
+               '--remove-orphans', '--scale', '-y', '--yes'},
+    'exec': {'-d', '--detach', '--dry-run', '-e', '--env', '--index', '-T', '--no-tty', '--privileged', '-u',
+             '--user', '-w', '--workdir'},
+    'ps': {'-a', '--all', '--dry-run', '--filter', '--format', '--no-trunc', '--orphans', '-q', '--quiet',
+           '--services', '--status'},
+    'rm': {'--dry-run', '-f', '--force', '-s', '--stop', '-v', '--volumes'},
+    'stop': {'--dry-run', '-t', '--timeout'},
+    'up': {'--abort-on-container-exit', '--always-recreate-deps', '--build', '-d', '--detach', '--dry-run',
+           '--force-recreate', '--no-build', '--no-deps', '--no-recreate', '--no-start', '--pull', '--quiet-pull',
+           '--remove-orphans', '--scale', '-t', '--timeout', '--wait', '--wait-timeout', '-y', '--yes'},
+}
+
+
+def compose_calls(path):
+    """Literal (subcommand, options) of every compose(project, ...) call in a script."""
+    import ast
+    calls = []
+    for node in ast.walk(ast.parse(path.read_text())):
+        if (isinstance(node, ast.Call) and getattr(node.func, 'id', None) == 'compose' and len(node.args) > 1
+                and isinstance(node.args[1], ast.Constant)):
+            literals = [a.value for a in node.args[1:] if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+            subcommand, rest = literals[0], literals[1:]
+            options = []
+            for arg in rest:
+                if arg.startswith('--'):
+                    options.append(arg)
+                elif arg.startswith('-') and len(arg) > 1:
+                    options.extend(f'-{flag}' for flag in arg[1:])
+                elif subcommand == 'exec':
+                    break  # the command run inside the container starts here
+            calls.append((subcommand, options))
+    return calls
+
+
+class ComposeOptionTests(unittest.TestCase):
+    def test_every_compose_call_uses_options_the_subcommand_accepts(self):
+        scripts = ('compose-import-legacy.py', 'compose-rehearsal.py', 'compose-recovery.py',
+                   'compose-release-update.py')
+        seen = 0
+        for script in scripts:
+            for subcommand, options in compose_calls(Path(__file__).with_name(script)):
+                seen += 1
+                with self.subTest(script=script, subcommand=subcommand):
+                    self.assertIn(subcommand, COMPOSE_OPTIONS)
+                    self.assertEqual(set(options) - COMPOSE_OPTIONS[subcommand], set())
+        self.assertGreater(seen, 20)
+
+    def test_the_checker_rejects_the_flag_that_broke_the_first_rehearsal(self):
+        self.assertNotIn('--no-deps', COMPOSE_OPTIONS['create'])
+
+
+class RollbackTests(unittest.TestCase):
+    def test_rollback_restores_previous_state_config_and_onecli_from_backup(self):
+        from argparse import Namespace
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project, state, txn, backup = root / 'project', root / 'state', root / 'txn', root / 'backup'
+            for d in (project, state, txn / 'previous/data', txn / 'previous/groups', backup):
+                d.mkdir(parents=True, mode=0o700)
+            for d in (txn, txn / 'previous', backup):
+                os.chmod(d, 0o700)
+            mail = root / 'mail.json'
+            (project / '.env').write_text(f'INFOMANIAK_BROKER_CONFIG_FILE={mail}\nTZ=imported\n')
+            mail.write_text('{"imported": true}')
+            (state / 'release.json').write_text(json.dumps({'revision': 'a' * 40}))
+            (state / 'data').mkdir()
+            (state / 'data/imported').write_text('real data copy')
+            (txn / 'previous/data/upgrade-state.json').write_text(json.dumps({'commit': 'a' * 40}))
+            (txn / 'previous/env').write_text(f'INFOMANIAK_BROKER_CONFIG_FILE={mail}\nTZ=synthetic\n')
+            (txn / 'previous/mail-config').write_text('{"synthetic": true}')
+            (backup / 'manifest.json').write_text(json.dumps({'revision': 'a' * 40}))
+            (root / 'keys').mkdir(mode=0o700)
+            key = root / 'keys/backup.key'
+            key.write_text('ab' * 32)
+            calls = []
+
+            def stage(ns):
+                target = Path(ns.target_dir)
+                (target / 'onecli-data').mkdir(parents=True)
+                (target / 'postgres.dump').write_bytes(b'dump')
+
+            def fake_write(path, content, uid, gid, mode):
+                path.write_bytes(content)
+
+            args = Namespace(project_root=str(project), state_root=str(state), rollback_txn=str(txn),
+                             target_backup_dir=str(backup), target_backup_key=str(key), apply=True,
+                             confirm_restore_previous_state=True)
+            with mock.patch.object(IMPORT, 'volume_names', return_value=('v-onecli', 'v-pg')), \
+                    mock.patch.object(IMPORT, 'compose', side_effect=lambda p, *a, **k: calls.append(a) or (0, '')), \
+                    mock.patch.object(IMPORT, 'restore_onecli', side_effect=lambda *a: calls.append(('restore', a))), \
+                    mock.patch.object(IMPORT, 'services_healthy', return_value=True), \
+                    mock.patch.object(IMPORT, 'atomic_write', side_effect=fake_write), \
+                    mock.patch.object(IMPORT.RECOVERY, 'verify_or_stage', side_effect=stage), \
+                    mock.patch('sys.stdout', new=io.StringIO()) as out:
+                IMPORT.rollback(args)
+            self.assertIn('rollback=healthy', out.getvalue())
+            self.assertTrue((state / 'data/upgrade-state.json').is_file())
+            self.assertFalse((state / 'data/imported').exists())
+            self.assertEqual((txn / 'discarded/data/imported').read_text(), 'real data copy')
+            self.assertIn('TZ=synthetic', (project / '.env').read_text())
+            self.assertEqual(mail.read_text(), '{"synthetic": true}')
+            restore = [c for c in calls if c and c[0] == 'restore'][0][1]
+            self.assertEqual((restore[1].name, restore[2].name, restore[3]), ('postgres.dump', 'onecli-data', ('v-onecli', 'v-pg')))
+            self.assertIn(('up', '-d', '--wait'), calls)
+            self.assertFalse((txn / 'rollback-stage').exists())
+
+    def test_rollback_refuses_an_incomplete_previous_state(self):
+        from argparse import Namespace
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for d in ('project', 'state', 'txn/previous', 'backup'):
+                (root / d).mkdir(parents=True, mode=0o700)
+            os.chmod(root / 'txn', 0o700)
+            os.chmod(root / 'backup', 0o700)
+            (root / 'keys').mkdir(mode=0o700)
+            (root / 'keys/k').write_text('ab' * 32)
+            args = Namespace(project_root=str(root / 'project'), state_root=str(root / 'state'),
+                             rollback_txn=str(root / 'txn'), target_backup_dir=str(root / 'backup'),
+                             target_backup_key=str(root / 'keys/k'), apply=False, confirm_restore_previous_state=False)
+            with self.assertRaisesRegex(IMPORT.ImportError_, 'previous_state_incomplete'):
+                IMPORT.rollback(args)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
