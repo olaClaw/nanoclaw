@@ -17,6 +17,14 @@ If you are a fresh install (you ran `git clone`, not `git pull`) and there are n
 
 Personal AI assistant. See [README.md](README.md) for philosophy and setup. Architecture lives in `docs/`.
 
+## Administrative dashboard
+
+Before dashboard, web administration, provider-switch, backup UI or update UI
+work, read [docs/dashboard/plan.md](docs/dashboard/plan.md). Keep its current
+state, next step and progress log updated. Do not put private runtime values,
+credentials or personal data in the repository or images. The dashboard plan
+does not authorize production changes.
+
 ## Quick Context
 
 The host is a single Node process that orchestrates per-session agent containers. Platform messages land via channel adapters, route through an entity model (users → messaging groups → agent groups → sessions), get written into the session's inbound DB, and wake a container. The agent-runner inside the container polls the DB, calls the agent, and writes back to the outbound DB. The host polls the outbound DB and delivers through the same adapter.
