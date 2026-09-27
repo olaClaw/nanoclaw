@@ -1,4 +1,4 @@
-# Synthetic Compose release update
+# Compose release update
 
 `scripts/compose-release-update.py` turns the tested LXC release cutover into
 a versioned, parameterized transaction. It is **synthetic-only**: it refuses
@@ -57,3 +57,31 @@ This tool intentionally does not offer a real-identity override. Before any
 production use, design and rehearse a separate upgrade path that handles
 state/schema changes, active agent sessions, intentionally stopped services,
 private credential migration and full-state rollback.
+
+## Production mode
+
+An install with real channel identities uses `--confirm-production` instead of
+`--confirm-synthetic`. Everything above still applies (clean checkout,
+digest-pinned images whose labels match the manifest, unchanged OneCLI,
+PostgreSQL and Signal pins, control-file backup and automatic rollback), plus:
+
+- **Same schema only.** The preflight compares, between the current and the
+  target commit, every file under `src/db/migrations/`, the module
+  `migrations/` directories and `src/mailbox/sqlite/schema.ts`. Any difference
+  stops it with `schema_change_requires_full_restore`: the rollback restores
+  code and control files, not data, so a release with new migrations needs a
+  procedure that also restores the data. A version bump is allowed.
+- **Fresh backup.** The encrypted backup must be of the current release, pass
+  `verify`, and be at most `--max-backup-age-minutes` old (default 120).
+- **Running agents.** They are allowed at preflight and stopped right after the
+  host; their pending messages stay queued and are processed after the start.
+- **After the start** the command waits for the expected channel adapters in the
+  host log (CLI, plus Signal and Telegram when configured, and `Signal channel
+connected`), then rebuilds every per-group image on the new base and checks
+  its `derived-from` and revision labels, so the first message does not wait
+  for a package build. Either check failing triggers the rollback.
+
+Create the backup with `compose-recovery.py backup --apply` just before the
+update, save its key in the password manager, and remove the key from the host
+once the update has been checked. Plan a short maintenance window: the host is
+stopped for the recreate and the per-group image rebuild.
