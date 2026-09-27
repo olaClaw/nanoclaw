@@ -317,6 +317,101 @@ def compose_calls(path):
     return calls
 
 
+class FinalSnapshotTests(unittest.TestCase):
+    """legacy-snapshot.py --final: the old install stays down only after a complete archive."""
+
+    def fixture(self, tmp):
+        from unittest import mock
+        root = Path(tmp)
+        project = root / 'project'
+        for d in ('data', 'groups', 'signal', 'onecli', 'out', 'keys'):
+            (root / d if d in ('signal', 'onecli', 'out', 'keys') else project / d).mkdir(parents=True)
+        (project / '.env').write_text('TZ=Europe/Rome\n')
+        with sqlite3.connect(project / 'data/v2.db') as db:
+            for table in SNAPSHOT.COUNT_TABLES:
+                db.execute(f'CREATE TABLE {table} (id TEXT)')
+            db.execute('CREATE TABLE schema_version (name TEXT)')
+            db.execute("INSERT INTO schema_version VALUES ('initial-v2-schema')")
+        ctx = {'project': project, 'user': mock.Mock(pw_uid=1000, pw_gid=1000, pw_name='svc'),
+               'output_root': root / 'out', 'key_root': root / 'keys', 'host_unit': 'nanoclaw-v2-x.service',
+               'slug': 'x', 'mail_config': None, 'env_file': project / '.env', 'signal': root / 'signal',
+               'config_dir': root / 'none'}
+        live = {'head': 'a' * 40, 'migrations': ['initial-v2-schema'], 'onecli': 'onecli-c', 'postgres': 'pg-c',
+                'onecli_data': root / 'onecli', 'pg_user': 'onecli', 'pg_db': 'onecli'}
+        return ctx, live
+
+    def run_snapshot(self, final, fail_dump=False):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx, live = self.fixture(tmp)
+            ctx['final'] = final
+            calls = []
+
+            def fake_run(argv, *, user=None, check=True, timeout=600, stdout=None, cwd=None):
+                calls.append(tuple(argv))
+                if argv[:2] == ['docker', 'exec'] and 'pg_dump' in argv:
+                    if fail_dump:
+                        raise SNAPSHOT.SnapshotError('command_failed')
+                    stdout.write(b'PGDMP fixture')
+                if argv[:2] == ['docker', 'inspect']:
+                    return 0, 'unless-stopped'
+                if 'is-enabled' in argv:
+                    return 0, ''
+                return 0, ''
+
+            def fake_encrypt(source, destination, key):
+                destination.write_bytes(source.read_bytes())
+                return {'encrypted_sha256': 'e' * 64, 'plain_sha256': 'p' * 64, 'bytes': destination.stat().st_size}
+
+            listing = mock.Mock(returncode=0, stdout=b'; TABLE public agents')
+            active = iter([False] + [True] * 50)
+            with mock.patch.object(SNAPSHOT, 'run', side_effect=fake_run), \
+                    mock.patch.object(SNAPSHOT.RECOVERY, 'encrypt', side_effect=fake_encrypt), \
+                    mock.patch.object(SNAPSHOT, 'unit_active', side_effect=lambda *a: next(active)), \
+                    mock.patch.object(SNAPSHOT.subprocess, 'run', return_value=listing), \
+                    mock.patch('sys.stdout', new=io.StringIO()) as out:
+                try:
+                    SNAPSHOT.snapshot(ctx, live)
+                    error = None
+                except SNAPSHOT.SnapshotError as exc:
+                    error = exc
+            rollback = sorted((ctx['output_root']).glob('*.rollback-old-install.sh'))
+            script = rollback[0].read_text() if rollback else None
+            folders = [p for p in ctx['output_root'].iterdir() if p.is_dir()]
+            return out.getvalue(), calls, script, folders, error
+
+    def test_final_snapshot_leaves_the_old_install_down_with_a_rollback(self):
+        output, calls, script, folders, error = self.run_snapshot(final=True)
+        self.assertIsNone(error)
+        self.assertIn('original_install=stopped_and_disabled', output)
+        self.assertIn('snapshot=encrypted', output)
+        self.assertFalse(any(c[:2] == ('docker', 'start') or c[-2:-1] == ('start',) for c in calls))
+        self.assertIn(('docker', 'update', '--restart=no', 'pg-c'), calls)
+        self.assertIn(('docker', 'update', '--restart=no', 'onecli-c'), calls)
+        self.assertIn(('systemctl', '--user', 'disable', 'nanoclaw-v2-x.service'), calls)
+        self.assertIn('docker update --restart=unless-stopped pg-c', script)
+        self.assertIn('systemctl --user enable nanoclaw-v2-x.service', script)
+        self.assertIn('systemctl --user start nanoclaw-v2-x.service', script)
+        self.assertEqual(len(folders), 1)
+
+    def test_final_snapshot_that_fails_before_the_archive_restarts_the_old_install(self):
+        output, calls, script, folders, error = self.run_snapshot(final=True, fail_dump=True)
+        self.assertIsNotNone(error)
+        self.assertIn('original_install=restarted', output)
+        self.assertIn(('docker', 'start', 'onecli-c'), calls)
+        self.assertIn(('systemctl', '--user', 'start', 'nanoclaw-v2-x.service'), calls)
+        self.assertFalse(any('disable' in c for c in calls))
+        self.assertIsNone(script)
+        self.assertEqual(folders, [])
+
+    def test_normal_snapshot_restarts_and_never_disables(self):
+        output, calls, script, _, error = self.run_snapshot(final=False)
+        self.assertIsNone(error)
+        self.assertIn('original_install=restarted', output)
+        self.assertFalse(any('disable' in c or '--restart=no' in c for c in calls))
+        self.assertIsNone(script)
+
+
 class ComposeOptionTests(unittest.TestCase):
     def test_every_compose_call_uses_options_the_subcommand_accepts(self):
         scripts = ('compose-import-legacy.py', 'compose-rehearsal.py', 'compose-recovery.py',
