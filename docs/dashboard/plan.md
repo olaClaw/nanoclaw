@@ -65,12 +65,23 @@ Companion documents in this directory:
   links. Rehearsed on the test LXC with a self-signed certificate: HTTP/2,
   login through TLS, hardened cookie, foreign origin refused.
 
+- **D3a (local path):** the panel changes the LLM endpoint and model for
+  every agent at once. The choice is stored in `data/model-settings.json`
+  (host-owned, 0600, in every backup), which wins over the `.env` values it
+  replaces; `.env` is never written. Preflight checks the endpoint against
+  the SSRF rules (private LAN/VPN only, not the stack's own networks, pinned
+  address, no redirects), lists its models and runs a one-token completion;
+  apply is a journaled job (snapshot, settings, every group row and pinned
+  session in one transaction, restart of every agent, verification), rolled
+  back on failure and at the next host start if cut off. External providers
+  are refused at preflight until their credentials can be checked per agent.
+
 ## Next step
 
-Deploy release updates from the panel on the production host (the third
-script, the candidates timer, the first release published with the new job),
-and install the next release from the panel as the real test. Then the
-provider/model switch (D3a) and the remaining agent operations.
+Rehearse the model change on the test LXC, deploy it with the next release,
+then the update procedure for schema-changing releases (full restore path,
+rehearsed on the test LXC). External providers for D3a wait for a per-agent
+credential check.
 
 ## Agreed product behavior
 
@@ -229,3 +240,4 @@ repository README.
 | 2026-09-27 | Backup deletion from the panel (operator request): `POST /api/v1/backups/{backup}/delete` with reauth, confirmation, audit and the release-update lock; archive and any key still on the server are removed; the last remaining backup and anything that is not a real backup folder inside the backup root are refused. UI: Elimina per backup (hidden on the last one) with a definitive-deletion confirmation. 3 new Python tests; checked in headless Chromium. | Deploy with the next release. |
 | 2026-09-27 | First-run setup code: `admin-cli.js setup-code` prints a one-time 80-bit code (Crockford groups, 30 minutes, same code until it expires) kept in the private state; `GET /api/v1/setup` tells the UI whether setup is needed, `POST /api/v1/setup` (anonymous, Origin-checked, throttled like login) creates the administrator only with that code, then removes it and logs in. UI: setup page with the console command, code and password twice (input normalized in the browser). The installation guide must explain it step by step (operator request). 3 new tests; checked in headless Chromium. | Guided HTTPS setup and the installation guide. |
 | 2026-09-27 | Guided HTTPS setup `scripts/compose-https-setup.py`: asks hostname, LAN/VPN bind, email and certificate mode (Let's Encrypt DNS-01 with the pinned proxy's providers, credentials hidden; or a local certificate for installs without a domain), then writes `.env`, recreates the services, creates the proxy admin on a fresh proxy (fresh-proxy API behaviour checked on a throwaway instance), obtains/installs the certificate, creates or updates the proxy host and checks HTTPS. 6 tests against a fake proxy; live run on the test LXC in local mode against the real proxy. | Installation guide; plain-HTTP opt-in. |
+| 2026-09-27 | D3a, local path: `POST /api/v1/model-settings/preflight` and `/apply`. Choice stored in `data/model-settings.json` (wins over `.env` for the default provider/model of new groups and the OpenCode endpoint/model/small model; a reported context window replaces the `.env` limit). Preflight: SSRF rules (http(s), no credentials/query, only RFC 1918/CGNAT/ULA, never loopback, link-local, single-label names or the host's own networks; request pinned to the checked address, no redirects, bounded body), `/models`, one-token completion, every agent listed, sessions to restart, models to pick from. Apply: journal, settings, all group rows (missing rows created) and sessions pinned to another provider in one transaction, restart of all agents, verification; rollback restores exactly and restarts again; boot recovery for a cut-off change; the operations service and the web service refuse other maintenance meanwhile. External providers refused at preflight. Fixed the projection of groups whose row has no provider (they run on Claude). 25 new tests; operator UI in Italian. | Rehearsal on the test LXC; schema-changing releases. |

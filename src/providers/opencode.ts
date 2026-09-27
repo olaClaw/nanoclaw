@@ -12,6 +12,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { readEnvFile } from '../env.js';
+import { applyOpenCodeOverrides } from '../model-settings.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
 
 const PASSTHROUGH_KEYS = [
@@ -62,6 +63,8 @@ registerProviderContainerConfig('opencode', (ctx) => {
     const value = ctx.hostEnv[key] ?? dotenv[key];
     if (value) env[key] = value;
   }
+  // The dashboard's install-wide choice replaces the endpoint and model.
+  applyOpenCodeOverrides(env);
 
   const mounts = ctx.coreOwnsProviderSurfaces
     ? []

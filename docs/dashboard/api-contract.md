@@ -110,6 +110,16 @@ error while applying triggers a rollback of the whole change.
 `OPENCODE_BASE_URL` is shared and stays private configuration. No per-agent
 selection in the first version.
 
+Implementation (D3a, local path): the preflight answer adds a global `reason`
+(the endpoint, model or provider problem, or null) and `available_models`
+(the IDs the endpoint lists that fit the model pattern, at most 50). A
+preflight is kept in host memory for ten minutes, is single-use and is refused
+at apply if the set of agent groups changed since (`preflight_stale`). The
+apply job is a host job: `GET /api/v1/jobs/{job}` goes to the operations
+service first and to the host when that answers `not_found`. Its phases are
+`snapshot`, `write_settings`, `update_agents`, `restart_agents`, `verify`,
+`done` (or `rollback`). Operator notes: [../compose-preview.md](../compose-preview.md).
+
 Backup import belongs in the requested release, but only as a controlled
 migration job with preflight and recovery, not as an upload that immediately
 overwrites state. Never infer web authorization from the mere existence of an

@@ -68,7 +68,7 @@ export const INDEX_HTML = `<!doctype html>
           <button type="button" data-view="backups">Backup</button>
           <button type="button" data-view="updates">Aggiornamenti</button>
         </nav>
-        <p class="aside-note">Dal pannello puoi creare backup, installare aggiornamenti e riavviare gli agenti.</p>
+        <p class="aside-note">Dal pannello puoi creare backup, installare aggiornamenti, riavviare gli agenti e cambiare il modello.</p>
       </aside>
       <main>
         <header>
@@ -186,7 +186,10 @@ export const APP_JS = String.raw`'use strict';
     last_backup: 'È l\'ultimo backup rimasto: non si può eliminare.',
     backup_unsafe: 'Questo backup non può essere eliminato dal pannello.',
     candidate_unknown: 'Questa release non è più tra le candidate: aggiorna la pagina.',
-    operation_in_progress: 'Un backup o un aggiornamento è già in corso.',
+    operation_in_progress: 'È già in corso un\'operazione di manutenzione (backup, aggiornamento o cambio modello).',
+    preflight_expired: 'Verifica scaduta: ripetila.',
+    preflight_stale: 'Gli agenti sono cambiati dopo la verifica: ripetila.',
+    preflight_not_ready: 'La verifica non è riuscita: correggi e ripeti.',
     key_not_on_host: 'La chiave non è più sul server.',
     reauth_required: 'Serve di nuovo la password.',
     ops_unavailable: 'Servizio operativo non attivo su questo server: backup e aggiornamenti restano disponibili da terminale.',
@@ -381,8 +384,98 @@ export const APP_JS = String.raw`'use strict';
         ['Raggiungibilità', status(m.endpoint_status.state)],
         ['Agenti allineati', m.agents.matching + ' su ' + m.agents.total],
       ])),
-      wide(null, el('p', { class: 'muted' }, 'Il cambio di provider e modello per tutti gli agenti arriverà in una prossima versione, con verifica preventiva e rollback.')),
+      modelForm(view),
     ));
+  }
+
+  const MODEL_REASONS = {
+    provider_unsupported: 'Per ora dal pannello si può scegliere solo un LLM locale compatibile OpenAI.',
+    provider_not_installed: 'OpenCode non è installato in questa istanza.',
+    endpoint_required: 'Inserisci l\'indirizzo dell\'LLM.',
+    endpoint_invalid: 'Indirizzo non valido: usa http(s)://host:porta/percorso, senza credenziali né parametri.',
+    endpoint_not_private: 'L\'indirizzo deve stare nella rete locale o nella VPN (non localhost né i servizi interni).',
+    endpoint_unresolvable: 'Il server non riesce a risolvere questo nome.',
+    endpoint_unreachable: 'L\'LLM non è raggiungibile dal server.',
+    endpoint_tls_failed: 'Il certificato HTTPS dell\'LLM non è valido.',
+    endpoint_unauthorized: 'L\'LLM chiede una credenziale: dal pannello non è ancora supportato.',
+    endpoint_invalid_response: 'L\'indirizzo non risponde come un server compatibile OpenAI (manca /models).',
+    model_not_found: 'Il modello non è tra quelli offerti dall\'LLM: scegline uno dall\'elenco.',
+    model_invalid: 'Nome del modello non valido.',
+    inference_failed: 'Il modello non ha risposto alla prova.',
+    too_many_agents: 'Troppi agenti per un cambio dal pannello.',
+    restart_in_progress: 'Un agente si sta riavviando: riprova tra poco.',
+    restart_failed: 'Il riavvio degli agenti non è riuscito.',
+    verify_failed: 'La verifica dopo il cambio non è riuscita.',
+    snapshot_failed: 'Non è stato possibile salvare la configurazione attuale.',
+    apply_failed: 'Il salvataggio della nuova configurazione non è riuscito.',
+    interrupted: 'Il server si è fermato durante il cambio.',
+  };
+  const reasonText = (code) => MODEL_REASONS[code] || ERRORS[code] || (code ? code.replaceAll('_', ' ') : 'errore');
+
+  function modelForm(view) {
+    const endpoint = el('input', { type: 'url', required: '', maxlength: '2048', autocomplete: 'off', spellcheck: 'false', placeholder: 'http://indirizzo-lan:8000/v1' });
+    const choices = el('datalist', { id: 'model-choices' });
+    const model = el('input', { type: 'text', required: '', maxlength: '120', autocomplete: 'off', spellcheck: 'false', list: 'model-choices' });
+    const result = el('div', {});
+    const form = el('form', { class: 'card wide inline-form' },
+      el('h2', {}, 'Cambia LLM e modello per tutti gli agenti'),
+      el('p', { class: 'muted' }, 'La scelta vale per tutti gli agenti, anche per quelli creati dopo. Prima si verifica che l\'LLM risponda con quel modello; se qualcosa va storto durante il cambio, la configurazione attuale viene ripristinata da sola.'),
+      el('label', { class: 'field' }, 'Indirizzo dell\'LLM locale (compatibile OpenAI)', endpoint),
+      el('label', { class: 'field' }, 'Modello, come lo elenca l\'LLM', model, choices),
+      el('div', { class: 'actions' }, el('button', { class: 'primary', type: 'submit' }, 'Verifica')),
+      result);
+    const check = async () => {
+      result.replaceChildren(el('p', { class: 'muted' }, 'Verifica in corso…'));
+      const answer = await api('POST', '/model-settings/preflight', { mode: 'local', provider: 'opencode', model: model.value.trim(), endpoint: endpoint.value.trim() });
+      if (answer.status === 403 && answer.code === 'reauth_required') {
+        result.replaceChildren();
+        askPassword(view, 'Per cambiare il modello inserisci di nuovo la password.', check);
+        return;
+      }
+      if (answer.status !== 200) { result.replaceChildren(el('p', { class: 'message error' }, ERRORS[answer.code] || 'Verifica non riuscita.')); return; }
+      const p = answer.data;
+      choices.replaceChildren(...p.available_models.map((id) => el('option', { value: id })));
+      if (!p.ready) {
+        const blocked = p.agents.filter((a) => !a.ready).length;
+        result.replaceChildren(el('div', {}, el('p', { class: 'message error' }, reasonText(p.reason || (p.agents.find((a) => a.reason) || {}).reason)),
+          p.reason ? null : el('p', { class: 'muted' }, blocked + ' agenti non pronti.')));
+        return;
+      }
+      const apply = el('button', { class: 'primary', type: 'button' }, 'Applica a tutti gli agenti');
+      result.replaceChildren(el('div', {},
+        el('p', {}, 'Pronto: ' + p.agents.length + ' agenti passano a questo modello; ' + p.sessions_to_restart + ' sessioni attive verranno riavviate e riprendono al prossimo messaggio.'),
+        p.leaves_lan ? el('p', { class: 'message error' }, 'Attenzione: richieste e contesto di tutti gli agenti usciranno dalla rete locale.') : null,
+        el('div', { class: 'actions' }, apply,
+          el('button', { class: 'secondary', type: 'button', onclick: () => result.replaceChildren() }, 'Annulla'))));
+      apply.addEventListener('click', () => applyModel(view, result, p.preflight_id));
+    };
+    form.addEventListener('submit', (event) => { event.preventDefault(); check(); });
+    return form;
+  }
+
+  async function applyModel(view, result, preflightId) {
+    const answer = await api('POST', '/model-settings/apply', { preflight_id: preflightId, confirm: true });
+    if (answer.status === 403 && answer.code === 'reauth_required') {
+      askPassword(view, 'Per applicare il cambio inserisci di nuovo la password.', () => applyModel(view, result, preflightId));
+      return;
+    }
+    if (answer.status !== 200 && answer.status !== 202) { result.replaceChildren(el('p', { class: 'message error' }, reasonText(answer.code))); return; }
+    const progress = el('p', { class: 'muted' }, 'Cambio in corso…');
+    result.replaceChildren(progress);
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const job = await api('GET', '/jobs/' + encodeURIComponent(answer.data.job.id));
+      if (job.status === 401) return;
+      if (job.status !== 200) continue;
+      const j = job.data;
+      progress.textContent = 'Fase: ' + (PHASES[j.phase] || j.phase);
+      if (j.outcome === 'running') continue;
+      await render('model');
+      if (j.outcome === 'succeeded') say('Modello cambiato per tutti gli agenti.');
+      else if (j.outcome === 'rolled_back') say('Cambio non riuscito (' + reasonText(j.failure_category) + '): configurazione precedente ripristinata.', true);
+      else say('Cambio non riuscito e ripristino da verificare: controlla il server da terminale.', true);
+      return;
+    }
   }
 
   const OUTCOMES = {
@@ -394,6 +487,8 @@ export const APP_JS = String.raw`'use strict';
     preflight: 'verifica preliminare', control_backup: 'copia dei file di controllo', stop_host: 'arresto dell\'host',
     switch_release: 'cambio di release', start_services: 'avvio dei servizi', wait_channels: 'attesa dei canali',
     refresh_images: 'aggiornamento immagini', refresh_dashboard: 'aggiornamento dashboard', rollback: 'ripristino',
+    snapshot: 'copia della configurazione attuale', write_settings: 'salvataggio delle impostazioni',
+    update_agents: 'aggiornamento degli agenti', restart_agents: 'riavvio degli agenti', verify: 'verifica', done: 'fine',
   };
   const outcome = (key) => {
     const [label, tone] = OUTCOMES[key] || [key, 'warn'];

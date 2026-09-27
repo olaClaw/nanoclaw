@@ -66,6 +66,7 @@ vi.mock('./dashboard/host/admin-socket.js', () => ({
   stopDashboardAdminSocket: vi.fn(),
 }));
 vi.mock('./dashboard/host/host-sources.js', () => ({ liveHostSources: vi.fn(), loadIdKey: vi.fn() }));
+vi.mock('./dashboard/host/model-apply.js', () => ({ recoverModelApply: vi.fn() }));
 vi.mock('./log.js', () => ({ log: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), fatal: vi.fn() } }));
 vi.mock('./channels/channel-registry.js', () => ({
   createChannelDeliveryAdapter: () => ({}),

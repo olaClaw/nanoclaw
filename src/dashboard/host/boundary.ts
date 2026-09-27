@@ -18,6 +18,7 @@ import { log } from '../../log.js';
 import { PATH_PARAMS, errorResponse, matchEndpoint, type Endpoint } from '../contract/api.js';
 import { resolvePublicId } from '../contract/opaque-id.js';
 import { validate } from '../contract/schema.js';
+import { ModelApplyError, applyModelChange, preflightModelChange, readJob } from './model-apply.js';
 import {
   agentIds,
   getAgent,
@@ -100,6 +101,22 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
   channels: ({ sources, cursor }) => listChannels(sources, cursor),
   sessions: ({ sources, cursor }) => listSessions(sources, cursor),
   model_settings: ({ sources }) => getModelSettings(sources),
+  model_preflight: ({ sources, body }) =>
+    preflightModelChange(sources, body as Parameters<typeof preflightModelChange>[1], restarting),
+  model_apply: async ({ sources, body }) => {
+    try {
+      return await applyModelChange(sources, (body as { preflight_id: string }).preflight_id);
+    } catch (error) {
+      if (error instanceof ModelApplyError) throw new BoundaryError(error.status, error.code);
+      throw error;
+    }
+  },
+  // The host's own jobs (the model change); the operations service serves the rest.
+  job: async ({ sources, params }) => {
+    const record = readJob(sources.dataDir, params.job);
+    if (!record) throw new BoundaryError(404, 'not_found');
+    return record;
+  },
 };
 
 function newRequestId(): string {

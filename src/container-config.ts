@@ -11,11 +11,12 @@
 import fs from 'fs';
 import path from 'path';
 
-import { DEFAULT_MODEL, FAST_MODE, GROUPS_DIR, MCP_PLAIN_HTTP_HOSTS, TIMEZONE } from './config.js';
+import { FAST_MODE, GROUPS_DIR, MCP_PLAIN_HTTP_HOSTS, TIMEZONE } from './config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { isValidTimezone } from './timezone.js';
 import { log } from './log.js';
+import { defaultModel } from './model-settings.js';
 import type { AgentGroup, ContainerConfigRow, ContainerSpeed } from './types.js';
 
 /**
@@ -379,9 +380,9 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     assistantName: row.assistant_name ?? group.name,
     agentGroupId: group.id,
     maxMessagesPerPrompt: row.max_messages_per_prompt ?? undefined,
-    // The group's own model wins; NANOCLAW_DEFAULT_MODEL fills in for groups
+    // The group's own model wins; the dashboard's choice, else NANOCLAW_DEFAULT_MODEL, fills in for groups
     // that have none. Both absent leaves the field out and the SDK decides.
-    model: row.model ?? (DEFAULT_MODEL || undefined),
+    model: row.model ?? (defaultModel() || undefined),
     effort: row.effort ?? undefined,
     // A cleared group value falls back to the install-wide default.
     ...speedFields(parseContainerSpeed(row.speed) ?? (FAST_MODE ? 'fast' : undefined)),

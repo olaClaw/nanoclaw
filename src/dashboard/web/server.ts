@@ -238,6 +238,33 @@ export function createDashboardServer(config: DashboardConfig): http.Server {
     }
   }
 
+  // Jobs live in two places: the operations service (backups, updates) and
+  // the host (the model change). Ask the first, then the other.
+  async function forwardJob(target: string): Promise<{ status: number; body: unknown }> {
+    if (config.opsForward) {
+      const fromOps = await config.opsForward('GET', target, undefined).catch((error: unknown) => {
+        if (error instanceof HttpError && error.code === 'upstream_unavailable') return null;
+        throw error;
+      });
+      if (fromOps && fromOps.status !== 404) return fromOps;
+    }
+    return config.forward('GET', target, undefined);
+  }
+
+  // Maintenance jobs started from this panel, until they are seen finished.
+  // Each side also guards itself (ops lock, host journal); this closes the gap
+  // between them, e.g. a backup while the model change restarts the agents.
+  const lockJobs = new Set<string>();
+  async function refuseWhileBusy(): Promise<void> {
+    for (const id of [...lockJobs]) {
+      const answer = await forwardJob(`/api/v1/jobs/${id}`).catch(() => null);
+      if (answer?.status === 200 && (answer.body as { outcome?: unknown } | null)?.outcome === 'running') {
+        throw new HttpError(409, 'operation_in_progress');
+      }
+      lockJobs.delete(id);
+    }
+  }
+
   async function handle(request: http.IncomingMessage): Promise<{ reply: Reply; endpoint: Endpoint | null }> {
     const method = request.method ?? '';
     const url = new URL(request.url ?? '/', 'http://dashboard.invalid');
@@ -277,14 +304,21 @@ export function createDashboardServer(config: DashboardConfig): http.Server {
       return { reply: await local(endpoint, session, token, body), endpoint };
     }
 
+    const locked = policy.lock === 'maintenance';
+    if (locked) await refuseWhileBusy();
     const target = config.opsForward && OPS_ENDPOINTS.has(endpoint.name) ? config.opsForward : config.forward;
-    const upstream = await target(method, url.pathname + url.search, body).catch((error: unknown) => {
-      // The operations service is optional: when it is not running, say so.
-      if (target !== config.forward && error instanceof HttpError && error.code === 'upstream_unavailable') {
-        throw new HttpError(503, 'ops_unavailable');
-      }
-      throw error;
-    });
+    const upstream =
+      endpoint.name === 'job'
+        ? await forwardJob(url.pathname)
+        : await target(method, url.pathname + url.search, body).catch((error: unknown) => {
+            // The operations service is optional: when it is not running, say so.
+            if (target !== config.forward && error instanceof HttpError && error.code === 'upstream_unavailable') {
+              throw new HttpError(503, 'ops_unavailable');
+            }
+            throw error;
+          });
+    const accepted = (upstream.body as { job?: { id?: unknown } } | null)?.job?.id;
+    if (locked && upstream.status < 300 && typeof accepted === 'string') lockJobs.add(accepted);
     const schema = upstream.status < 300 ? endpoint.response : errorResponse;
     const fits =
       schema === null

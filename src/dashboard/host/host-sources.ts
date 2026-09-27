@@ -8,10 +8,12 @@ import path from 'path';
 
 import { getActiveAdapters } from '../../channels/channel-registry.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
-import { DATA_DIR, DEFAULT_AGENT_PROVIDER, DEFAULT_MODEL } from '../../config.js';
+import { DATA_DIR } from '../../config.js';
 import { readEnvFile } from '../../env.js';
+import { defaultAgentProvider, defaultModel, readModelSettings } from '../../model-settings.js';
 import { getCodeIdentity } from '../../upgrade-state.js';
 import { MIN_KEY_BYTES } from '../contract/opaque-id.js';
+import { liveEndpointDeps, probeEndpoint } from './model-endpoint.js';
 import type { HostSources } from './projections.js';
 
 /**
@@ -57,8 +59,21 @@ function releaseIdentity(): { version: string; revision: string } | null {
   }
 }
 
+const REACHABILITY_TTL_MS = 60_000;
+
+/** The OpenCode endpoint and model containers start with: the panel's choice, else `.env`. */
+function openCodeTarget(): { endpoint: string; model: string } {
+  const settings = readModelSettings();
+  if (settings) return { endpoint: settings.endpoint, model: settings.model };
+  const env = readEnvFile(['OPENCODE_BASE_URL', 'OPENCODE_MODEL']);
+  return {
+    endpoint: process.env.OPENCODE_BASE_URL || env.OPENCODE_BASE_URL || '',
+    model: process.env.OPENCODE_MODEL || env.OPENCODE_MODEL || '',
+  };
+}
+
 export function liveHostSources(idKey: Buffer): HostSources {
-  const endpoint = process.env.OPENCODE_BASE_URL || readEnvFile(['OPENCODE_BASE_URL']).OPENCODE_BASE_URL;
+  let reachability: { endpoint: string; at: number; state: 'reachable' | 'unreachable' | 'unknown' } | null = null;
   return {
     idKey,
     channels: () =>
@@ -68,8 +83,35 @@ export function liveHostSources(idKey: Buffer): HostSources {
         connected: adapter.isConnected(),
       })),
     release: releaseIdentity,
-    defaults: { provider: DEFAULT_AGENT_PROVIDER, model: DEFAULT_MODEL, endpointConfigured: Boolean(endpoint) },
+    get defaults() {
+      const target = openCodeTarget();
+      return {
+        provider: defaultAgentProvider(),
+        model: defaultModel(),
+        opencodeModel: target.model,
+        endpointConfigured: Boolean(target.endpoint),
+      };
+    },
     now: () => new Date(),
     restartAgent: (internalId) => restartAgentGroupContainers(internalId, 'restarted from the dashboard'),
+    dataDir: DATA_DIR,
+    probeModel: (endpoint, model) => probeEndpoint(endpoint, model, liveEndpointDeps()),
+    async endpointState() {
+      const { endpoint } = openCodeTarget();
+      if (!endpoint || endpoint === 'native') return 'unknown';
+      if (reachability?.endpoint === endpoint && Date.now() - reachability.at < REACHABILITY_TTL_MS) {
+        return reachability.state;
+      }
+      const probe = await probeEndpoint(endpoint, null, liveEndpointDeps(), { list: 3_000, inference: 0 });
+      // Addresses the probe may not contact (public, loopback) are not "down", just unchecked.
+      const state =
+        probe.reason === null || probe.reason === 'endpoint_unauthorized'
+          ? 'reachable'
+          : ['endpoint_unreachable', 'endpoint_tls_failed', 'endpoint_invalid_response'].includes(probe.reason)
+            ? 'unreachable'
+            : 'unknown';
+      reachability = { endpoint, at: Date.now(), state };
+      return state;
+    },
   };
 }
