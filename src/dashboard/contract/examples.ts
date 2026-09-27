@@ -47,6 +47,8 @@ export const EXAMPLES: Readonly<Record<string, unknown>> = {
   login: sessionState,
   session: sessionState,
   logout: null,
+  setup_state: { needed: false },
+  setup: sessionState,
   reauth: { ...sessionState, reauth_expires_at: '2026-01-15T12:05:00Z' },
 
   overview: {

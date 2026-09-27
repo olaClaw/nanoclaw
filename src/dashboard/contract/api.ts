@@ -124,6 +124,14 @@ export const sessionState = object({
   csrf_token: str(64, /^[A-Za-z0-9_-]{43}$/),
 });
 export const reauthRequest = object({ password });
+/**
+ * First-run setup: a one-time code read on the server console
+ * (`admin-cli.js setup-code`) lets the browser create the administrator.
+ * 16 Crockford base32 characters in groups of four (80 bits).
+ */
+export const setupCode = str(19, /^[0-9A-HJKMNP-TV-Z]{4}(?:-[0-9A-HJKMNP-TV-Z]{4}){3}$/);
+export const setupState = object({ needed: bool });
+export const setupRequest = object({ code: setupCode, password });
 export const health = object({ status: oneOf('ok') });
 
 // ── Read-only resources ──
@@ -316,6 +324,24 @@ export const ENDPOINTS: readonly Endpoint[] = [
     path: '/api/v1/session',
     request: null,
     response: null,
+    status: 'v1',
+    epic: 'D2',
+  },
+  {
+    name: 'setup_state',
+    method: 'GET',
+    path: '/api/v1/setup',
+    request: null,
+    response: setupState,
+    status: 'v1',
+    epic: 'D2',
+  },
+  {
+    name: 'setup',
+    method: 'POST',
+    path: '/api/v1/setup',
+    request: setupRequest,
+    response: sessionState,
     status: 'v1',
     epic: 'D2',
   },

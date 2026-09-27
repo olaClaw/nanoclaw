@@ -5,13 +5,14 @@
  *   node dist/dashboard/web/admin-cli.js set-password     # asks twice, no echo
  *   node dist/dashboard/web/admin-cli.js revoke-sessions
  *   node dist/dashboard/web/admin-cli.js unlock           # clear the login throttle
+ *   node dist/dashboard/web/admin-cli.js setup-code       # first run: one-time code for the web setup page
  *
  * The password is read from the terminal (or, without a terminal, from the
  * first line of stdin), never from arguments or the environment, and is not
  * printed. Setting it revokes every session. There is no web bootstrap and no
  * reset by email: recovery is this command.
  */
-import { hashPassword, passwordProblem } from './password.js';
+import { SETUP_LIFETIME_MS, generateSetupCode, hashPassword, passwordProblem } from './password.js';
 import { DashboardState } from './state.js';
 
 function readHidden(prompt: string): Promise<string> {
@@ -67,11 +68,16 @@ export async function runAdminCommand(command: string | undefined, state: Dashbo
     case 'revoke-sessions':
       state.revokeSessions(now);
       return 'all sessions revoked';
+    case 'setup-code': {
+      if (state.admin()) throw new Error('an administrator already exists; use set-password to change it');
+      const record = state.ensureSetupCode(now, generateSetupCode, SETUP_LIFETIME_MS);
+      return `setup code: ${record.code} (valid until ${record.expires_at}; enter it on the panel's first page)`;
+    }
     case 'unlock':
       state.setThrottle({ failures: 0, locked_until: null });
       return 'login throttle cleared';
     default:
-      throw new Error('usage: admin-cli.js set-password | revoke-sessions | unlock');
+      throw new Error('usage: admin-cli.js set-password | setup-code | revoke-sessions | unlock');
   }
 }
 

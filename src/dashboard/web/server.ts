@@ -18,13 +18,21 @@
  * Responses are JSON with `no-store` and a strict CSP. Errors are a code and
  * a request ID. Nothing here logs bodies, cookies, paths or values.
  */
-import { randomBytes } from 'crypto';
+import { randomBytes, timingSafeEqual } from 'crypto';
 import http from 'http';
 
 import { PATH_PARAMS, errorResponse, matchEndpoint, type Endpoint } from '../contract/api.js';
 import { policyFor, type RateLimitClass } from '../contract/authorization.js';
 import { validate } from '../contract/schema.js';
-import { DEFAULT_PARAMS, hashPassword, needsRehash, verifyPassword, type ScryptParams } from './password.js';
+import {
+  DEFAULT_PARAMS,
+  hashPassword,
+  needsRehash,
+  normalizeSetupCode,
+  passwordProblem,
+  verifyPassword,
+  type ScryptParams,
+} from './password.js';
 import { LoginThrottle, SessionStore, type Session } from './sessions.js';
 import type { DashboardState } from './state.js';
 import { APP_CSS, APP_JS, INDEX_HTML, UI_CSP } from './ui.js';
@@ -195,6 +203,32 @@ export function createDashboardServer(config: DashboardConfig): http.Server {
       case 'logout':
         sessions.destroy(token);
         return { status: 204, body: undefined, headers: { 'set-cookie': clearedCookie } };
+      case 'setup_state':
+        return { status: 200, body: { needed: !config.state.admin() } };
+      case 'setup': {
+        if (config.state.admin()) throw new HttpError(409, 'already_configured');
+        const wait = throttle.waitMs();
+        if (wait > 0) throw new HttpError(429, 'login_throttled', { 'retry-after': String(Math.ceil(wait / 1000)) });
+        const request = body as { code: string; password: string };
+        const pending = config.state.setupCode(new Date(now()));
+        const given = Buffer.from(normalizeSetupCode(request.code));
+        const expected = Buffer.from(pending?.code ?? '');
+        if (!pending || given.length !== expected.length || !timingSafeEqual(given, expected)) {
+          throttle.failure();
+          throw new HttpError(401, 'invalid_setup_code');
+        }
+        const problem = passwordProblem(request.password);
+        if (problem) throw new HttpError(400, `password_${problem}`);
+        config.state.setPassword(await hashPassword(request.password, scrypt), new Date(now()));
+        config.state.clearSetupCode();
+        throttle.success();
+        const created = sessions.create(generation());
+        return {
+          status: 200,
+          body: sessions.view(created.session),
+          headers: { 'set-cookie': sessionCookie(created.token) },
+        };
+      }
       case 'reauth':
         await checkPassword((body as { password: string }).password);
         sessions.markReauth(session!);
@@ -239,7 +273,7 @@ export function createDashboardServer(config: DashboardConfig): http.Server {
       if (endpoint.name !== 'import_preflight') throw new HttpError(400, 'invalid_request');
     }
 
-    if (['health', 'login', 'session', 'logout', 'reauth'].includes(endpoint.name)) {
+    if (['health', 'login', 'session', 'logout', 'reauth', 'setup', 'setup_state'].includes(endpoint.name)) {
       return { reply: await local(endpoint, session, token, body), endpoint };
     }
 

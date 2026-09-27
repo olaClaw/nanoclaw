@@ -183,11 +183,11 @@ describe('authorization matrix', () => {
     expect(policyDrift()).toEqual([]);
   });
 
-  it('allows anonymous access only to health and login', () => {
+  it('allows anonymous access only to health, login and first-run setup', () => {
     const anonymous = Object.entries(POLICIES)
       .filter(([, p]) => p.auth === 'anonymous')
       .map(([name]) => name);
-    expect(anonymous.sort()).toEqual(['health', 'login']);
+    expect(anonymous.sort()).toEqual(['health', 'login', 'setup', 'setup_state']);
   });
 
   it('protects every state-changing request with Origin, CSRF (after login) and audit', () => {
@@ -199,7 +199,8 @@ describe('authorization matrix', () => {
       }
       expect(policy.origin, endpoint.name).toBe(true);
       expect(policy.audit, endpoint.name).toBe(true);
-      expect(policy.csrf, endpoint.name).toBe(endpoint.name !== 'login');
+      // Login and setup happen before a session (and its CSRF token) exists.
+      expect(policy.csrf, endpoint.name).toBe(endpoint.name !== 'login' && endpoint.name !== 'setup');
     }
   });
 

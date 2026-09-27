@@ -203,10 +203,24 @@ To enable it on a Compose host:
 2. Set `NANOCLAW_DASHBOARD_ORIGIN` in the private `.env` to the exact https
    origin of the panel (the service refuses to start without it).
 3. Start it: `docker compose --env-file .env --profile core-preview --profile dashboard up -d --wait dashboard`.
-4. Set the administrator password from the console, never through arguments
-   or files: `docker compose --env-file .env --profile core-preview --profile dashboard exec dashboard node dist/dashboard/web/admin-cli.js set-password`.
-   The same command offers `revoke-sessions` and `unlock` (clears the login
-   throttle).
+4. Create the administrator. On a new install the panel opens on a
+   **first-run setup page** instead of the login:
+   1. On the server, from the Compose checkout, run
+      `docker compose --env-file .env --profile core-preview --profile dashboard exec dashboard node dist/dashboard/web/admin-cli.js setup-code`.
+      It prints a one-time code (four groups of four characters) and the
+      time it expires, 30 minutes later. Running it again within that time
+      prints the same code; after expiry it prints a new one.
+   2. In the browser, enter that code and the password twice (at least 12
+      characters; store it in a password manager). The code works once: the
+      page then logs you in and disappears for good.
+
+   Wrong codes count against the same throttle as wrong passwords. Anyone who
+   reaches the page without console access cannot create the administrator.
+   Without the browser, the console command `admin-cli.js set-password` (asks
+   twice, no echo) sets or replaces the password directly; it also revokes
+   every session. The same tool offers `revoke-sessions` and `unlock` (clears
+   the login throttle). A lost password is replaced with `set-password`; there
+   is no reset by email.
 
 The dashboard itself listens only on the server's loopback address
 (`NANOCLAW_DASHBOARD_LOOPBACK_PORT`, default 18080), for API checks through an

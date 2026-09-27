@@ -30,7 +30,7 @@ import {
 } from './projections.js';
 
 /** Handled by the dashboard service itself (login and sessions); never forwarded. */
-export const DASHBOARD_LOCAL = new Set(['health', 'login', 'session', 'logout', 'reauth']);
+export const DASHBOARD_LOCAL = new Set(['health', 'login', 'session', 'logout', 'reauth', 'setup', 'setup_state']);
 
 const LIST_ENDPOINTS = new Set(['agents', 'channels', 'sessions']);
 const CURSOR = /^o\d{1,6}$/;

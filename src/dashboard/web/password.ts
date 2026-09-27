@@ -87,6 +87,29 @@ export function needsRehash(stored: string, params: ScryptParams = DEFAULT_PARAM
   return !parsed || parsed.params.N < params.N || parsed.params.r < params.r || parsed.params.p < params.p;
 }
 
+const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+/** A first-run setup code stays usable for half an hour. */
+export const SETUP_LIFETIME_MS = 30 * 60 * 1000;
+
+/** 80 random bits as four groups of four Crockford base32 characters. */
+export function generateSetupCode(): string {
+  const bytes = randomBytes(10);
+  let bits = 0n;
+  for (const byte of bytes) bits = (bits << 8n) | BigInt(byte);
+  const characters: string[] = [];
+  for (let index = 0; index < 16; index++) {
+    characters.unshift(CROCKFORD[Number(bits & 31n)]);
+    bits >>= 5n;
+  }
+  return characters.join('').match(/.{4}/g)!.join('-');
+}
+
+/** Uppercase, spaces removed, the usual Crockford look-alikes mapped. */
+export function normalizeSetupCode(input: string): string {
+  const flat = input.toUpperCase().replace(/[\s-]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1');
+  return flat.length === 16 ? flat.match(/.{4}/g)!.join('-') : input;
+}
+
 export function isPasswordRecord(stored: string): boolean {
   return parse(stored) !== null;
 }

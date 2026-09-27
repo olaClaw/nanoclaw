@@ -16,7 +16,16 @@ import { startDashboardAdminSocket, stopDashboardAdminSocket } from '../host/adm
 import type { HostSources } from '../host/projections.js';
 import { runAdminCommand } from './admin-cli.js';
 import { dashboardConfigFromEnv } from './main.js';
-import { hashPassword, needsRehash, passwordProblem, verifyPassword, type ScryptParams } from './password.js';
+import {
+  SETUP_LIFETIME_MS,
+  generateSetupCode,
+  hashPassword,
+  needsRehash,
+  normalizeSetupCode,
+  passwordProblem,
+  verifyPassword,
+  type ScryptParams,
+} from './password.js';
 import { COOKIE, OPS_ENDPOINTS, createDashboardServer, socketForward, type Forward } from './server.js';
 import { ABSOLUTE_MS, IDLE_MS, REAUTH_MS, SessionStore } from './sessions.js';
 import { DashboardState } from './state.js';
@@ -77,6 +86,16 @@ describe('password hashing', () => {
     expect(needsRehash(stored)).toBe(true);
     expect(needsRehash(stored, FAST)).toBe(false);
     await expect(hashPassword('short', FAST)).rejects.toThrow('too_short');
+  });
+});
+
+describe('setup codes', () => {
+  it('are 80 random bits in Crockford groups and accept look-alike input', () => {
+    const codes = new Set(Array.from({ length: 50 }, generateSetupCode));
+    expect(codes.size).toBe(50);
+    for (const code of codes) expect(code).toMatch(/^[0-9A-HJKMNP-TV-Z]{4}(-[0-9A-HJKMNP-TV-Z]{4}){3}$/);
+    expect(normalizeSetupCode(' abcd efgh jkmn pqrs ')).toBe('ABCD-EFGH-JKMN-PQRS');
+    expect(normalizeSetupCode('o1il-0000-0000-0000')).toBe('0111-0000-0000-0000');
   });
 });
 
@@ -276,6 +295,77 @@ describe('dashboard server end to end over the host boundary', () => {
     }
     for (const [, target] of APP_JS.matchAll(/fetch\(([^,]+),/g)) expect(target.trim()).toBe("'/api/v1' + path");
     expect(INDEX_HTML).not.toMatch(/https?:\/\//);
+    // The script is a String.raw template: a doubled backslash would reach the browser as-is.
+    expect(APP_JS).not.toMatch(/\\\\[sdw]/);
+  });
+
+  it('creates the first administrator with a one-time console code', async () => {
+    const fresh = privateDir('dash-setup-');
+    const freshState = new DashboardState(fresh);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    state = freshState;
+    await start();
+    expect((await call('GET', '/api/v1/setup')).json()).toEqual({ needed: true });
+    const noCode = await call('POST', '/api/v1/setup', {
+      body: { code: 'ABCD-EFGH-JKMN-PQRS', password: PASSWORD },
+      headers: { origin: ORIGIN },
+    });
+    expect((noCode.json() as { error: { code: string } }).error.code).toBe('invalid_setup_code');
+
+    const code = freshState.ensureSetupCode(new Date(clock), generateSetupCode, SETUP_LIFETIME_MS).code;
+    expect(code).toMatch(/^[0-9A-HJKMNP-TV-Z]{4}(-[0-9A-HJKMNP-TV-Z]{4}){3}$/);
+    expect((await call('POST', '/api/v1/setup', { body: { code, password: PASSWORD } })).status).toBe(403);
+    expect(
+      (await call('POST', '/api/v1/setup', { body: { code, password: 'short' }, headers: { origin: ORIGIN } })).status,
+    ).toBe(400);
+    const done = await call('POST', '/api/v1/setup', {
+      body: { code, password: PASSWORD },
+      headers: { origin: ORIGIN },
+    });
+    expect(done.status).toBe(200);
+    expect(String(done.headers['set-cookie'])).toContain('HttpOnly');
+    expect(freshState.admin()).not.toBeNull();
+    expect(fs.existsSync(path.join(fresh, 'setup.json'))).toBe(false);
+    // The browser normalizes what the operator types; the contract only accepts the canonical form.
+    expect(validate(sessionState, done.json())).toEqual([]);
+    expect((await call('GET', '/api/v1/setup')).json()).toEqual({ needed: false });
+    const again = await call('POST', '/api/v1/setup', {
+      body: { code, password: PASSWORD },
+      headers: { origin: ORIGIN },
+    });
+    expect((again.json() as { error: { code: string } }).error.code).toBe('already_configured');
+    expect((await login()).response.status).toBe(200);
+    expect(() => freshState.ensureSetupCode(new Date(clock), generateSetupCode, SETUP_LIFETIME_MS)).toThrow(
+      'already exists',
+    );
+    fs.rmSync(fresh, { recursive: true, force: true });
+  });
+
+  it('expires setup codes and throttles wrong ones', async () => {
+    const fresh = privateDir('dash-setup-exp-');
+    const freshState = new DashboardState(fresh);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    state = freshState;
+    await start();
+    const code = freshState.ensureSetupCode(new Date(clock), generateSetupCode, SETUP_LIFETIME_MS).code;
+    expect(freshState.ensureSetupCode(new Date(clock + 1000), generateSetupCode, SETUP_LIFETIME_MS).code).toBe(code);
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await call('POST', '/api/v1/setup', {
+        body: { code: 'ABCD-EFGH-JKMN-PQRS', password: PASSWORD },
+        headers: { origin: ORIGIN },
+      });
+    }
+    expect(
+      (await call('POST', '/api/v1/setup', { body: { code, password: PASSWORD }, headers: { origin: ORIGIN } })).status,
+    ).toBe(429);
+    clock += SETUP_LIFETIME_MS + 61_000;
+    const late = await call('POST', '/api/v1/setup', {
+      body: { code, password: PASSWORD },
+      headers: { origin: ORIGIN },
+    });
+    expect((late.json() as { error: { code: string } }).error.code).toBe('invalid_setup_code');
+    expect(freshState.admin()).toBeNull();
+    fs.rmSync(fresh, { recursive: true, force: true });
   });
 
   it('answers health anonymously with the security headers', async () => {
