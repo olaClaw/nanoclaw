@@ -49,16 +49,23 @@ Companion documents in this directory:
   5-minute reauth window, per-session rate limits, an audit log (endpoint,
   status, request ID) and forwarding to the host boundary with a second
   contract check. `admin-cli.js` sets the password from the console, revokes
-  sessions and clears the throttle. Not yet in Compose.
+  sessions and clears the throttle. In Compose as the opt-in `dashboard`
+  profile; rehearsed on the synthetic test LXC (login, read-only API).
+- **D3 done (read-only screens):** the service serves an Italian UI at `/`
+  (`src/dashboard/web/ui.ts`): login, overview, agents with detail, channels,
+  sessions, model settings; backups and updates show "not yet available"
+  until the operations service exists. Same-origin CSP without inline code,
+  values rendered as text only, CSRF token in memory only. Checked in
+  headless Chromium against the real boundary and the synthetic install.
 
 ## Next step
 
-Compose integration and rehearsal: add the `dashboard` service (the host image
-with the `dist/dashboard/web/main.js` entry point, its own UID, a private state
-directory and the admin socket directory as its only mounts, no port on the
-host), set `NANOCLAW_DASHBOARD_ADMIN_SOCKET` for the host, build a release and
-rehearse login and the read-only API on the test LXC. Then D8 (NPM/HTTPS) and
-D3 (the read-only screens).
+D8: Nginx Proxy Manager in front of the `dashboard` service on the Compose
+host, HTTPS on the LAN/VPN address only, DNS-01 certificate, NPM admin on
+loopback. Needs from the operator: subdomain (private), DNS provider token
+with minimal rights, confirmation that no router forward reaches the host.
+Then the root-side operations service (releases, backups, jobs), which the
+update and backup screens wait for.
 
 ## Agreed product behavior
 
@@ -208,3 +215,4 @@ repository README.
 | 2026-09-27 | D0: contract in `src/dashboard/contract/` (dependency-free strict schema language, 25 endpoints with request/response schemas, authorization matrix, HMAC public IDs, examples), synthetic install and canaries in `src/dashboard/fixtures/`, threat model T1–T20. 25 contract tests. No runtime change. | D1/D2: host boundary and login. |
 | 2026-09-27 | D1: host boundary over a Unix socket (HTTP framing, 64 KiB bodies, 15 s timeouts, `no-store`), read-only projections, per-install public-ID key in `data/dashboard/`, off unless `NANOCLAW_DASHBOARD_ADMIN_SOCKET` is set. 17 new tests (canaries, tampering, framing, key file). | D2: dashboard service and login. |
 | 2026-09-27 | D2: dashboard web service (auth, sessions, throttle, CSRF/Origin, reauth, audit, forwarding) and the local admin CLI; scrypt by operator decision. 19 new tests, including end to end over the real admin socket and the synthetic install. Fixed a keep-alive bug on refused uploads (413 now closes the connection) in both the service and the host socket. | Compose integration and test-LXC rehearsal. |
+| 2026-09-27 | D3: read-only UI served by the dashboard service; structural tests (CSP, no inline code, no `innerHTML`/storage, fetch only to `/api/v1`) and a headless Chromium walk-through (wrong password, login, every screen, agent detail, logout; no console errors, cookie not readable by script). | D8 (HTTPS), then the operations service. |

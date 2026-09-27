@@ -20,6 +20,7 @@ import { hashPassword, needsRehash, passwordProblem, verifyPassword, type Scrypt
 import { COOKIE, createDashboardServer, socketForward, type Forward } from './server.js';
 import { ABSOLUTE_MS, IDLE_MS, REAUTH_MS, SessionStore } from './sessions.js';
 import { DashboardState } from './state.js';
+import { APP_JS, INDEX_HTML } from './ui.js';
 
 const FAST: ScryptParams = { N: 2 ** 14, r: 8, p: 1 };
 const PASSWORD = 'correct horse battery staple';
@@ -218,6 +219,42 @@ describe('dashboard server end to end over the host boundary', () => {
     const csrf = response.status === 200 ? (response.json() as { csrf_token: string }).csrf_token : '';
     return { cookie, csrf, response };
   }
+
+  it('serves the UI with a same-origin CSP and no inline code', async () => {
+    const page = await call('GET', '/');
+    expect(page.status).toBe(200);
+    expect(page.headers['content-type']).toContain('text/html');
+    const csp = String(page.headers['content-security-policy']);
+    expect(csp).toContain("script-src 'self'");
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).not.toContain('unsafe-inline');
+    expect(page.headers['cache-control']).toBe('no-store');
+    for (const tag of page.body.match(/<script[^>]*>/g) ?? []) expect(tag).toMatch(/ src="\/app\.js"/);
+    expect(page.body).not.toMatch(/<style|\sstyle=|\son[a-z]+=/i);
+    const script = await call('GET', '/app.js');
+    expect(script.headers['content-type']).toContain('text/javascript');
+    expect((await call('GET', '/app.css')).headers['content-type']).toContain('text/css');
+    expect((await call('GET', '/app.js?v=1')).status).toBe(404);
+    expect((await call('GET', '/index.html')).status).toBe(404);
+  });
+
+  it('renders data as text only and keeps the CSRF token out of storage', () => {
+    expect(() => new Function(APP_JS)).not.toThrow();
+    for (const banned of [
+      'innerHTML',
+      'outerHTML',
+      'insertAdjacentHTML',
+      'document.write',
+      'localStorage',
+      'sessionStorage',
+      'eval(',
+      'new Function',
+    ]) {
+      expect(APP_JS, banned).not.toContain(banned);
+    }
+    for (const [, target] of APP_JS.matchAll(/fetch\(([^,]+),/g)) expect(target.trim()).toBe("'/api/v1' + path");
+    expect(INDEX_HTML).not.toMatch(/https?:\/\//);
+  });
 
   it('answers health anonymously with the security headers', async () => {
     const response = await call('GET', '/api/v1/health');
