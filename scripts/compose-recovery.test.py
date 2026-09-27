@@ -60,6 +60,11 @@ class ComposeRecoveryTests(unittest.TestCase):
         self.assertTrue(allowed('state/data/host-harness/x/node_modules/.bin/tool', '../pkg/bin/tool'))
         self.assertFalse(allowed('state/data/host-harness/x/node_modules/.bin/tool', '../../../../../groups/g'))
         self.assertFalse(allowed('state/data/a', '../../env'))
+        self.assertTrue(allowed('state/proxy/letsencrypt/live/npm-1/cert.pem', '../../archive/npm-1/cert1.pem'))
+        self.assertFalse(allowed('state/proxy/letsencrypt/live/npm-1/cert.pem', '/etc/letsencrypt/archive/npm-1/cert1.pem'))
+        self.assertFalse(allowed('state/proxy/letsencrypt/live/npm-1/cert.pem', '../../../../data/v2.db'))
+        self.assertFalse(allowed('state/proxy/data/x', '../letsencrypt/archive/y'))
+        self.assertFalse(allowed('state/proxy/letsencrypt/live/x', ''))
         for name, target in (('state/data/x', '/etc/passwd'), ('state/data/x', '/app/../etc'),
                              ('state/link', '/usr/bin/python3'), ('state/signal/k', '/tmp/x'),
                              ('env', '/etc/passwd'), ('state/groups/main/empty', '')):
