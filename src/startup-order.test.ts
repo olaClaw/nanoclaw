@@ -9,7 +9,7 @@ const state = vi.hoisted(() => ({
   ready: vi.fn(),
 }));
 vi.mock('./backfill-container-configs.js', () => ({ backfillContainerConfigs: vi.fn() }));
-vi.mock('./config.js', () => ({ CENTRAL_DB_PATH: ':memory:' }));
+vi.mock('./config.js', () => ({ CENTRAL_DB_PATH: ':memory:', DASHBOARD_ADMIN_SOCKET: '' }));
 vi.mock('./circuit-breaker.js', () => ({ enforceStartupBackoff: vi.fn(), resetCircuitBreaker: vi.fn() }));
 vi.mock('./upgrade-state.js', () => ({ enforceUpgradeTripwire: vi.fn() }));
 vi.mock('./db/connection.js', () => ({ initDb: async () => ({ dialect: 'sqlite' }), closeDb: vi.fn() }));
@@ -61,6 +61,11 @@ vi.mock('./modules/index.js', () => ({}));
 vi.mock('./cli/commands/index.js', () => ({}));
 vi.mock('./cli/delivery-action.js', () => ({}));
 vi.mock('./cli/socket-server.js', () => ({ startCliServer: state.ready, stopCliServer: vi.fn() }));
+vi.mock('./dashboard/host/admin-socket.js', () => ({
+  startDashboardAdminSocket: vi.fn(),
+  stopDashboardAdminSocket: vi.fn(),
+}));
+vi.mock('./dashboard/host/host-sources.js', () => ({ liveHostSources: vi.fn(), loadIdKey: vi.fn() }));
 vi.mock('./log.js', () => ({ log: { info: vi.fn(), error: vi.fn(), warn: vi.fn(), fatal: vi.fn() } }));
 vi.mock('./channels/channel-registry.js', () => ({
   createChannelDeliveryAdapter: () => ({}),
