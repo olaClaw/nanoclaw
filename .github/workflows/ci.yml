@@ -358,6 +358,7 @@ jobs:
           name: compose-release-${{ github.sha }}
           path: ${{ runner.temp }}/compose-release.json
           if-no-files-found: error
+          retention-days: 14
 
   # Publish the verified manifest as a GitHub release, so a Compose host's
   # operations service can offer it as an update candidate without a token.
@@ -388,7 +389,13 @@ jobs:
           revision="$(jq -er .revision "$file")"
           [[ "$revision" = "$GITHUB_SHA" ]]
           tag="compose-${GITHUB_SHA:0:8}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # A rerun: the release must already carry exactly this manifest.
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern compose-release.json \
+              --dir "$RUNNER_TEMP/existing"
+            cmp "$file" "$RUNNER_TEMP/existing/compose-release.json"
+            exit 0
+          fi
           gh release create "$tag" "$file" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "Compose release ${GITHUB_SHA:0:8}" \
             --notes "Digest-pinned image manifest for the Compose stack at ${GITHUB_SHA}. Hosts verify revision, tree and image labels before installing it."
-          retention-days: 14
