@@ -427,5 +427,59 @@ class UpdateOperationTests(BackupOperationTests):
             os.close(fd)
 
 
+class BackupDeleteTests(BackupOperationTests):
+    def make(self, count):
+        ids = []
+        for _ in range(count):
+            job_id = OPS.handle(self.sources, 'POST', '/api/v1/backups', {'confirm': True})[1]['job']['id']
+            ids.append(self.wait(job_id)['backup'])
+        return ids
+
+    def test_deletes_archive_and_key_but_never_the_last_backup(self):
+        first, second = self.make(2)
+        self.assertEqual(len(list((self.root / 'keys').iterdir())), 2)
+        body = OPS.handle(self.sources, 'POST', f'/api/v1/backups/{first}/delete', {'confirm': True})[1]
+        self.assertEqual(body, {'backup': first, 'deleted': True})
+        listed = [item['id'] for item in OPS.handle(self.sources, 'GET', '/api/v1/backups')[1]['items']]
+        self.assertEqual(listed, [second])
+        self.assertEqual(len(list((self.root / 'keys').iterdir())), 1)
+        with self.assertRaises(OPS.OpsError) as caught:
+            OPS.handle(self.sources, 'POST', f'/api/v1/backups/{second}/delete', {'confirm': True})
+        self.assertEqual((caught.exception.status, caught.exception.code), (409, 'last_backup'))
+
+    def test_refuses_while_an_operation_holds_the_lock_and_checks_the_request(self):
+        first, _ = self.make(2)
+        fd = os.open(self.sources.control_root / OPS.LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            OPS.fcntl.flock(fd, OPS.fcntl.LOCK_EX)
+            with self.assertRaises(OPS.OpsError) as caught:
+                OPS.handle(self.sources, 'POST', f'/api/v1/backups/{first}/delete', {'confirm': True})
+            self.assertEqual(caught.exception.code, 'operation_in_progress')
+        finally:
+            os.close(fd)
+        for method, target, body, code in (
+                ('POST', f'/api/v1/backups/{first}/delete', {'confirm': False}, 'invalid_request'),
+                ('GET', f'/api/v1/backups/{first}/delete', None, 'method_not_allowed'),
+                ('POST', '/api/v1/backups/bkp_' + '0' * 32 + '/delete', {'confirm': True}, 'not_found')):
+            with self.subTest(target=target, body=body), self.assertRaises(OPS.OpsError) as caught:
+                OPS.handle(self.sources, method, target, body)
+            self.assertEqual(caught.exception.code, code)
+        self.assertEqual(len(OPS.handle(self.sources, 'GET', '/api/v1/backups')[1]['items']), 2)
+
+    def test_does_not_follow_a_linked_backup_folder(self):
+        self.make(1)
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'precious').write_text('keep')
+        link = self.sources.backup_root / 'aaaaaaaa-20260115T140000Z-linked'
+        link.symlink_to(outside, target_is_directory=True)
+        private(outside / 'manifest.json', {'revision': 'a' * 40, 'created_utc': '20260115T140000Z'})
+        linked_id = self.sources.public_id('backup', link.name)
+        with self.assertRaises(OPS.OpsError) as caught:
+            OPS.handle(self.sources, 'POST', f'/api/v1/backups/{linked_id}/delete', {'confirm': True})
+        self.assertEqual(caught.exception.code, 'not_found')
+        self.assertTrue((outside / 'precious').exists())
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

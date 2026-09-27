@@ -168,6 +168,7 @@ export const EXAMPLES: Readonly<Record<string, unknown>> = {
   backup_create: accepted('backup_create'),
   backup_verify: accepted('backup_verify'),
   backup_key: { backup: 'bkp_0f1e2d3c4b5a69788796a5b4c3d2e1f0', key: '0123456789abcdef'.repeat(4) },
+  backup_delete: { backup: 'bkp_0f1e2d3c4b5a69788796a5b4c3d2e1f0', deleted: true },
   backup_key_saved: { backup: 'bkp_0f1e2d3c4b5a69788796a5b4c3d2e1f0', key_on_host: false },
   backup_export: accepted('backup_export'),
   import_preflight: accepted('import_preflight'),

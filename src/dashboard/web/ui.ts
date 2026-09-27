@@ -129,6 +129,9 @@ dd { margin: 0; font-weight: 600; }
 .secret { display: block; padding: 12px; border-radius: 9px; background: #fff; border: 1px solid var(--line); font: 600 .95rem/1.4 ui-monospace, monospace; word-break: break-all; user-select: all; }
 .choice { display: flex; align-items: center; gap: 9px; margin-top: 10px; }
 .primary:disabled { opacity: .5; cursor: not-allowed; }
+.danger { border-radius: 9px; padding: 9px 13px; font-weight: 680; background: #fff; color: var(--danger); border: 1px solid #e3a9a9; }
+.danger:hover { background: var(--danger-bg); }
+.row-actions { display: flex; align-items: center; gap: 9px; }
 @media (max-width: 800px) {
   .shell { display: block; }
   aside { padding: 15px; }
@@ -158,6 +161,8 @@ export const APP_JS = String.raw`'use strict';
     rate_limited: 'Troppe richieste: attendi un minuto.',
     upstream_unavailable: 'Il servizio NanoClaw non risponde.',
     restart_in_progress: 'Un riavvio di questo agente è già in corso.',
+    last_backup: 'È l\'ultimo backup rimasto: non si può eliminare.',
+    backup_unsafe: 'Questo backup non può essere eliminato dal pannello.',
     candidate_unknown: 'Questa release non è più tra le candidate: aggiorna la pagina.',
     operation_in_progress: 'Un backup o un aggiornamento è già in corso.',
     key_not_on_host: 'La chiave non è più sul server.',
@@ -521,6 +526,28 @@ export const APP_JS = String.raw`'use strict';
     }
   }
 
+  function confirmDelete(view, item) {
+    const box = el('article', { class: 'card wide key-card' },
+      el('h2', {}, 'Eliminare il backup del ' + when(item.created_at) + '?'),
+      el('p', {}, 'È definitivo: l\'archivio cifrato' + (item.key_on_host ? ' e la sua chiave ancora sul server vengono cancellati' : ' viene cancellato') +
+        '. Una copia della chiave nel password manager non serve più. L\'ultimo backup rimasto non si può eliminare.'),
+      el('div', { class: 'actions' },
+        el('button', { class: 'danger', type: 'button', onclick: () => { box.remove(); deleteBackup(view, item); } }, 'Elimina definitivamente'),
+        el('button', { class: 'secondary', type: 'button', onclick: () => box.remove() }, 'Annulla')));
+    view.prepend(box);
+  }
+
+  async function deleteBackup(view, item) {
+    const result = await api('POST', '/backups/' + encodeURIComponent(item.id) + '/delete', { confirm: true });
+    if (result.status === 403 && result.code === 'reauth_required') {
+      askPassword(view, 'Per eliminare il backup inserisci di nuovo la password.', () => deleteBackup(view, item));
+      return;
+    }
+    if (result.status !== 200) { say(ERRORS[result.code] || 'Eliminazione non riuscita.', true); return; }
+    await render('backups');
+    say('Backup eliminato.');
+  }
+
   async function renderBackups(view, cursor) {
     const result = await api('GET', '/backups' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''));
     if (result.status !== 200) return fail(view, result);
@@ -532,9 +559,13 @@ export const APP_JS = String.raw`'use strict';
     view.append(wide(null, b.items.length ? b.items.map((item) => row(
       'Backup del ' + when(item.created_at),
       'Release ' + item.release_revision.slice(0, 8) + ' · ' + size(item.size_bytes) + (item.key_on_host ? ' · chiave ancora sul server' : ''),
-      item.key_on_host
-        ? el('button', { class: 'secondary', type: 'button', onclick: () => revealKey(view, item.id) }, 'Mostra chiave')
-        : status(item.verification),
+      el('div', { class: 'row-actions' },
+        item.key_on_host
+          ? el('button', { class: 'secondary', type: 'button', onclick: () => revealKey(view, item.id) }, 'Mostra chiave')
+          : status(item.verification),
+        b.items.length > 1 || cursor
+          ? el('button', { class: 'danger', type: 'button', onclick: () => confirmDelete(view, item) }, 'Elimina')
+          : null),
     )) : el('p', { class: 'muted' }, 'Nessun backup.')));
     if (b.next_cursor) {
       const more = el('button', { class: 'secondary', type: 'button', onclick: () => { more.remove(); renderBackups(view, b.next_cursor); } }, 'Carica altri');

@@ -222,7 +222,8 @@ backup --apply` under the release-update lock, so a backup and an update never
 overlap, whichever side starts them. After a backup the panel shows its key
 once; when the operator confirms it is saved in a password manager, the
 service shreds it from the server. Backups whose key is still on the server
-are flagged in the list. Release updates work the same way. Every published release attaches its
+are flagged in the list. A backup can also be deleted from the panel (archive
+and any key left on the server); the last remaining one cannot. Release updates work the same way. Every published release attaches its
 digest-pinned manifest to a GitHub release `compose-<revision>`; the hourly
 `nanoclaw-ops-candidates` timer (the only operations unit with network access)
 fetches the newest ones, keeps those whose revision descends from the
