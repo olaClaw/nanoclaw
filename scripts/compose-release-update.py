@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,7 +57,7 @@ def require(condition, code):
         fail(code)
 
 
-def command(argv, *, cwd=None, owner=None, timeout=600):
+def command(argv, *, cwd=None, owner=None, timeout=600, merge_stderr=False):
     environment = os.environ.copy()
     drop = None
     if owner is not None:
@@ -70,8 +71,8 @@ def command(argv, *, cwd=None, owner=None, timeout=600):
             os.setuid(owner.st_uid)
 
     result = subprocess.run(argv, cwd=cwd, env=environment, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, timeout=timeout,
-                            preexec_fn=drop, check=False)
+                            stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
+                            timeout=timeout, preexec_fn=drop, check=False)
     require(result.returncode == 0, 'command_failed')
     return result.stdout.decode('utf-8').strip()
 
@@ -81,9 +82,9 @@ def git(project, *args, owner=None):
                    timeout=60)
 
 
-def compose(project, *args):
+def compose(project, *args, timeout=600):
     return command(['docker', 'compose', '-f', str(project / 'compose.yaml'),
-                    '--profile', RECOVERY.PROFILE, *args], cwd=project)
+                    '--profile', RECOVERY.PROFILE, *args], cwd=project, timeout=timeout)
 
 
 def regular_private(path, owner):
@@ -182,6 +183,91 @@ def require_synthetic(values, channels):
             channels == {'cli'}, 'synthetic_identity_required')
 
 
+SCHEMA_PATHS = ('src/db/migrations', 'src/modules', 'src/mailbox/sqlite/schema.ts')
+LOG_TITLE = re.compile(r'\s(?:INFO|WARN|ERROR)\s+(.+?)(?:\s+[A-Za-z_][A-Za-z0-9_]*=|$)')
+ANSI = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def schema_fingerprint(project, revision, owner):
+    """Blob ids of every file that defines the central or session DB schema at a revision."""
+    listing = git(project, 'ls-tree', '-r', revision, '--', *SCHEMA_PATHS, owner=owner)
+    entries = []
+    for line in listing.splitlines():
+        meta, path = line.split('\t', 1)
+        if path.endswith('.test.ts'):
+            continue
+        if path.startswith('src/modules/') and '/migrations/' not in path:
+            continue
+        entries.append((path, meta.split()[2]))
+    return sorted(entries)
+
+
+def backup_age_minutes(manifest):
+    created = datetime.strptime(manifest.get('created_utc', ''), '%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - created).total_seconds() / 60
+
+
+def log_titles(text):
+    """Message titles of host log lines (no key=value parameters)."""
+    titles = []
+    for line in ANSI.sub('', text).splitlines():
+        match = LOG_TITLE.search(line)
+        if match:
+            titles.append(match.group(1).strip())
+    return titles
+
+
+def expected_channels(values):
+    return 1 + bool(values.get('SIGNAL_ACCOUNT')) + bool(values.get('TELEGRAM_BOT_TOKEN'))
+
+
+def channels_ready(titles, values):
+    started = sum(1 for title in titles if title == 'Channel adapter started')
+    signal_ok = not values.get('SIGNAL_ACCOUNT') or 'Signal channel connected' in titles
+    return started >= expected_channels(values) and signal_ok
+
+
+def wait_for_channels(project, values, since, timeout=120):
+    container = compose(project, 'ps', '-q', 'nanoclaw')
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        titles = log_titles(command(['docker', 'logs', '--since', since, container], timeout=60,
+                                    merge_stderr=True))
+        if channels_ready(titles, values):
+            print(f'channels_started={sum(1 for t in titles if t == "Channel adapter started")}', flush=True)
+            return
+        time.sleep(5)
+    fail('channels_not_ready')
+
+
+def refresh_derived_images(project, state, target):
+    """Rebuild every per-group image on the new base now, instead of on the first message."""
+    with sqlite3.connect(f'file:{state / "data/v2.db"}?mode=ro', uri=True) as db:
+        rows = db.execute("SELECT agent_group_id FROM container_configs WHERE image_tag IS NOT NULL AND "
+                          "((packages_apt IS NOT NULL AND packages_apt NOT IN ('', '[]')) OR "
+                          "(packages_npm IS NOT NULL AND packages_npm NOT IN ('', '[]')))").fetchall()
+    base = command(['docker', 'image', 'inspect', '-f', '{{.Id}}', target['images']['agent']])
+    for (group,) in rows:
+        require(re.fullmatch(r'[A-Za-z0-9._-]{1,128}', group), 'agent_group_id_invalid')
+        compose(project, 'exec', '-T', 'nanoclaw', 'node', 'dist/cli/client.js', 'groups', 'restart',
+                '--id', group, '--rebuild', timeout=1200)
+        with sqlite3.connect(f'file:{state / "data/v2.db"}?mode=ro', uri=True) as db:
+            tag = db.execute('SELECT image_tag FROM container_configs WHERE agent_group_id = ?',
+                             (group,)).fetchone()[0]
+        labels = json.loads(command(['docker', 'image', 'inspect', '-f', '{{json .Config.Labels}}', tag])) or {}
+        require(labels.get('dev.nanoclaw.derived-from') == base and
+                labels.get('org.opencontainers.image.revision') == target['revision'],
+                'derived_image_not_refreshed')
+    print(f'derived_images_refreshed={len(rows)}', flush=True)
+
+
+def stop_agents(install):
+    agents = RECOVERY.running_agents(install)
+    if agents:
+        command(['docker', 'stop', *agents])
+    print(f'agent_containers_stopped={len(agents)}', flush=True)
+
+
 def release_state(project, controls, expected, owner):
     require(git(project, 'rev-parse', 'HEAD', owner=owner) == expected['revision'] and
             git(project, 'rev-parse', 'HEAD^{tree}', owner=owner) == expected['tree'] and
@@ -200,6 +286,7 @@ def release_state(project, controls, expected, owner):
 
 
 def preflight(args):
+    production = bool(getattr(args, 'confirm_production', False))
     project = RECOVERY.source_path(args.project_root, kind='dir')
     state = RECOVERY.source_path(args.state_root, kind='dir')
     target_file = RECOVERY.source_path(args.release_manifest, kind='file')
@@ -229,7 +316,7 @@ def preflight(args):
     target_blob = target_file.read_bytes()
     target = validate_manifest(target_blob)
     require(current['revision'] != target['revision'] and
-            current['version'] == target['version'] and
+            (production or current['version'] == target['version']) and
             all(current['images'][name] == target['images'][name]
                 for name in ('onecli', 'postgres', 'signal')),
             'unsupported_release_transition')
@@ -243,7 +330,11 @@ def preflight(args):
                 'synthetic_state_invalid')
         channels = {row[0] for row in db.execute(
             'SELECT DISTINCT channel_type FROM messaging_groups')}
-    require_synthetic(values, channels)
+    if production:
+        require(re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,31}', values.get('NANOCLAW_INSTALL_ID', '')),
+                'install_id_invalid')
+    else:
+        require_synthetic(values, channels)
     require(git(project, 'rev-parse', f'{target["revision"]}^{{commit}}', owner=owner) ==
             target['revision'] and
             git(project, 'rev-parse', f'{target["revision"]}^{{tree}}', owner=owner) ==
@@ -258,15 +349,30 @@ def preflight(args):
                 labels.get('org.olaclaw.source.tree') == target['tree'] and
                 info.get('Os') == 'linux' and info.get('Architecture') == 'amd64',
                 'target_image_identity_mismatch')
-    no_agents(values['NANOCLAW_INSTALL_ID'])
+    if production:
+        # A production rollback restores code and control files only; a schema
+        # change would need the data restored from the backup as well.
+        require(schema_fingerprint(project, current['revision'], owner) ==
+                schema_fingerprint(project, target['revision'], owner),
+                'schema_change_requires_full_restore')
+    else:
+        no_agents(values['NANOCLAW_INSTALL_ID'])
     service_health(project)
     backup_manifest = json.loads((backup_dir / 'manifest.json').read_bytes())
     require(backup_manifest.get('revision') == current['revision'],
             'backup_release_mismatch')
+    if production:
+        try:
+            age = backup_age_minutes(backup_manifest)
+        except ValueError:
+            fail('backup_age_unknown')
+        require(0 <= age <= args.max_backup_age_minutes, 'backup_too_old')
     RECOVERY.verify_or_stage(argparse.Namespace(
         action='verify', backup_dir=str(backup_dir), key_file=str(key_file)))
     print('release_update_preflight=ok', flush=True)
-    return project, controls, current_bytes, metadata, current, target_blob, target, owner, values
+    print(f'release_update_mode={"production" if production else "synthetic"}', flush=True)
+    return (project, controls, current_bytes, metadata, current, target_blob, target, owner, values,
+            state, production)
 
 
 def control_backup(root, current_bytes, controls):
@@ -293,7 +399,8 @@ def controls_unchanged(controls, contents):
 
 
 def apply_update(context, backup_root):
-    project, controls, current_bytes, metadata, current, target_blob, target, owner, values = context
+    (project, controls, current_bytes, metadata, current, target_blob, target, owner, values,
+     state, production) = context
     controls_unchanged(controls, current_bytes)
     next_env = rewrite_env(current_bytes[controls[0]], target['images'])
     marker = json.loads(current_bytes[controls[2]])
@@ -307,7 +414,10 @@ def apply_update(context, backup_root):
         stop_attempted = True
         compose(project, 'stop', 'nanoclaw')
         print('old_host_stopped=yes', flush=True)
-        no_agents(values['NANOCLAW_INSTALL_ID'])
+        if production:
+            stop_agents(values['NANOCLAW_INSTALL_ID'])
+        else:
+            no_agents(values['NANOCLAW_INSTALL_ID'])
         controls_unchanged(controls, current_bytes)
         git(project, 'switch', '--detach', target['revision'], owner=owner)
         require(git(project, 'rev-parse', 'HEAD', owner=owner) == target['revision'],
@@ -317,10 +427,15 @@ def apply_update(context, backup_root):
         release_state(project, controls, target, owner)
         compose(project, 'up', '-d', '--wait', '--no-deps', '--no-build', '--pull',
                 'never', '--force-recreate', *SUPPORT)
+        since = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         compose(project, 'up', '-d', '--wait', '--no-deps', '--no-build', '--pull',
                 'never', '--force-recreate', 'nanoclaw')
         service_health(project)
         release_state(project, controls, target, owner)
+        if production:
+            wait_for_channels(project, values, since)
+            refresh_derived_images(project, state, target)
+            service_health(project)
         print('release_update=healthy', flush=True)
     except Exception as error:
         print('release_update=failed', flush=True)
@@ -332,6 +447,8 @@ def apply_update(context, backup_root):
         try:
             try:
                 compose(project, 'stop', 'nanoclaw')
+                if production:
+                    stop_agents(values['NANOCLAW_INSTALL_ID'])
             except Exception:
                 pass
             checkout_restored = True
@@ -359,11 +476,15 @@ def main():
                  'key-file', 'control-backup-root'):
         parser.add_argument('--' + flag, required=True)
     parser.add_argument('--confirm-synthetic', action='store_true')
+    parser.add_argument('--confirm-production', action='store_true',
+                        help='install with real identities: same schema only, fresh backup required')
+    parser.add_argument('--max-backup-age-minutes', type=int, default=120)
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     os.umask(0o077)
     require(os.geteuid() == 0, 'root_required')
-    require(args.confirm_synthetic, 'synthetic_confirmation_required')
+    require(args.confirm_synthetic != args.confirm_production, 'mode_confirmation_required')
+    require(0 < args.max_backup_age_minutes <= 24 * 60, 'backup_age_limit_invalid')
     backup_root = RECOVERY.private_directory(Path(args.control_backup_root))
     lock_path = backup_root / '.compose-release-update.lock'
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)

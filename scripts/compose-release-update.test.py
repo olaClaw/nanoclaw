@@ -120,7 +120,7 @@ class ComposeReleaseUpdateTests(unittest.TestCase):
                 owner = project.stat()
                 context = (project, controls, old_bytes, metadata, old,
                            json.dumps(new).encode(), new, owner,
-                           {'NANOCLAW_INSTALL_ID': 'synthetic'})
+                           {'NANOCLAW_INSTALL_ID': 'synthetic'}, controls[1].parent, False)
                 head = [old['revision']]
                 calls = []
 
@@ -175,6 +175,117 @@ class ComposeReleaseUpdateTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('failure_category=invalid_arguments', result.stdout)
         self.assertNotIn(secret, result.stdout + result.stderr)
+
+
+class ProductionModeTests(unittest.TestCase):
+    def git_repo(self, root):
+        env = {**os.environ, 'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
+               'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@example.invalid'}
+        run = lambda *a: subprocess.run(['git', '-C', str(root), *a], env=env, check=True,
+                                        capture_output=True, text=True).stdout.strip()
+        run('init', '-q')
+        return run
+
+    def test_schema_fingerprint_ignores_tests_and_sees_migrations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = self.git_repo(root)
+            (root / 'src/db/migrations').mkdir(parents=True)
+            (root / 'src/modules/x/migrations').mkdir(parents=True)
+            (root / 'src/modules/x/other.ts').write_text('a')
+            (root / 'src/db/migrations/001-a.ts').write_text('a')
+            (root / 'src/db/migrations/001-a.test.ts').write_text('t')
+            (root / 'src/modules/x/migrations/m.ts').write_text('m')
+            run('add', '-A'); run('commit', '-qm', 'one'); first = run('rev-parse', 'HEAD')
+            (root / 'src/db/migrations/001-a.test.ts').write_text('t2')
+            (root / 'src/modules/x/other.ts').write_text('b')
+            run('commit', '-qam', 'two'); second = run('rev-parse', 'HEAD')
+            (root / 'src/modules/x/migrations/m.ts').write_text('m2')
+            run('commit', '-qam', 'three'); third = run('rev-parse', 'HEAD')
+            fp = lambda rev: UPDATE.schema_fingerprint(root, rev, None)
+            self.assertEqual(fp(first), fp(second))
+            self.assertNotEqual(fp(second), fp(third))
+            self.assertEqual({path for path, _ in fp(first)},
+                             {'src/db/migrations/001-a.ts', 'src/modules/x/migrations/m.ts'})
+
+    def test_backup_age_and_channel_readiness(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        self.assertLess(UPDATE.backup_age_minutes({'created_utc': now.strftime('%Y%m%dT%H%M%SZ')}), 2)
+        old = (now - timedelta(hours=3)).strftime('%Y%m%dT%H%M%SZ')
+        self.assertGreater(UPDATE.backup_age_minutes({'created_utc': old}), 170)
+        log = ('[10:00:00.000] \x1b[32mINFO\x1b[39m \x1b[36mChannel adapter started\x1b[39m channel="cli"\n'
+               '[10:00:00.100] INFO Channel adapter started channel="signal"\n'
+               '[10:00:00.200] INFO Signal channel connected account="+0"\n'
+               '[10:00:00.300] WARN Channel credentials missing, skipping channel="x"\n')
+        titles = UPDATE.log_titles(log)
+        self.assertIn('Signal channel connected', titles)
+        self.assertNotIn('+0', ' '.join(titles))
+        self.assertTrue(UPDATE.channels_ready(titles, {'SIGNAL_ACCOUNT': '+0'}))
+        self.assertFalse(UPDATE.channels_ready(titles, {'SIGNAL_ACCOUNT': '+0', 'TELEGRAM_BOT_TOKEN': 't'}))
+        self.assertFalse(UPDATE.channels_ready(titles[:2], {'SIGNAL_ACCOUNT': '+0'}))
+
+    def test_production_apply_refreshes_images_and_rolls_back_when_that_fails(self):
+        for fail_refresh in (False, True):
+            with self.subTest(fail_refresh=fail_refresh), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                project, state = root / 'project', root / 'state'
+                (state / 'data').mkdir(parents=True)
+                project.mkdir()
+                old = manifest('a' * 40, 'b' * 40, 'old')
+                new = manifest('c' * 40, 'd' * 40, 'new')
+                for name in ('onecli', 'postgres', 'signal'):
+                    new['images'][name] = old['images'][name]
+                controls = (project / '.env', state / 'release.json', state / 'data/upgrade-state.json')
+                env = ''.join(f'{key}={old["images"][name]}\n' for name, key in UPDATE.IMAGE_KEYS.items())
+                controls[0].write_text(env + 'NANOCLAW_INSTALL_ID=prod\nSIGNAL_ACCOUNT=+0\n')
+                controls[1].write_text(json.dumps(old))
+                controls[2].write_text(json.dumps({'version': '2.4.0', 'commit': old['revision'],
+                                                   'tree': old['tree']}))
+                for path in controls:
+                    os.chmod(path, 0o600)
+                old_bytes = {path: path.read_bytes() for path in controls}
+                metadata = {path: path.stat() for path in controls}
+                context = (project, controls, old_bytes, metadata, old, json.dumps(new).encode(), new,
+                           project.stat(), {'NANOCLAW_INSTALL_ID': 'prod', 'SIGNAL_ACCOUNT': '+0'}, state, True)
+                head = [old['revision']]
+                events = []
+
+                def fake_git(_project, *args, owner=None):
+                    if args[:2] == ('switch', '--detach'):
+                        head[0] = args[-1]
+                    if args == ('rev-parse', 'HEAD^{tree}'):
+                        return old['tree'] if head[0] == old['revision'] else new['tree']
+                    if args == ('status', '--porcelain'):
+                        return ''
+                    return head[0]
+
+                def refresh(*_):
+                    events.append('refresh')
+                    if fail_refresh:
+                        raise UPDATE.UpdateError('derived_image_not_refreshed')
+
+                output = io.StringIO()
+                with (patch.object(UPDATE, 'git', side_effect=fake_git),
+                      patch.object(UPDATE, 'compose', return_value=''),
+                      patch.object(UPDATE, 'stop_agents', side_effect=lambda *_: events.append('stop_agents')),
+                      patch.object(UPDATE, 'wait_for_channels', side_effect=lambda *_: events.append('channels')),
+                      patch.object(UPDATE, 'refresh_derived_images', side_effect=refresh),
+                      patch.object(UPDATE, 'service_health'),
+                      redirect_stdout(output)):
+                    if fail_refresh:
+                        with self.assertRaisesRegex(UPDATE.UpdateError, 'update_failed'):
+                            UPDATE.apply_update(context, root)
+                    else:
+                        UPDATE.apply_update(context, root)
+                self.assertEqual(events[:3], ['stop_agents', 'channels', 'refresh'])
+                if fail_refresh:
+                    self.assertEqual(head[0], old['revision'])
+                    self.assertTrue(all(path.read_bytes() == old_bytes[path] for path in controls))
+                    self.assertIn('rollback=healthy', output.getvalue())
+                else:
+                    self.assertEqual(head[0], new['revision'])
+                    self.assertIn('release_update=healthy', output.getvalue())
 
 
 if __name__ == '__main__':
