@@ -180,3 +180,32 @@ rolled back automatically with successful agent prompts on both sides. The
 backup tool deliberately stops at offline staging; the separate
 `compose-rehearsal.py` performs a synthetic-only restore and rollback. A
 production cutover and real channel migration still need their own review.
+
+## Administrative dashboard (opt-in profile)
+
+The `dashboard` service is off unless Compose runs with `--profile dashboard`
+as well as `core-preview`. It uses the host image with another entry point
+(`dist/dashboard/web/main.js`) and UID 1001, and mounts only two things: its
+private state directory `/srv/nanoclaw/dashboard` (administrator credential,
+login throttle, audit log) and the `dashboard-admin` named volume that holds
+the host's admin socket. It has no Docker socket, `ncl.sock` or NanoClaw data.
+The host always serves the socket on that volume; without the dashboard
+nothing reaches it. The volume is not part of any backup; the state directory
+is, as part of `/srv/nanoclaw`. Design and security model:
+[dashboard/plan.md](dashboard/plan.md).
+
+To enable it on a Compose host:
+
+1. Create the state directory: `install -d -m 700 -o 1001 -g 1001 /srv/nanoclaw/dashboard`.
+2. Set `NANOCLAW_DASHBOARD_ORIGIN` in the private `.env` to the exact https
+   origin of the panel (the service refuses to start without it).
+3. Start it: `docker compose --env-file .env --profile core-preview --profile dashboard up -d --wait dashboard`.
+4. Set the administrator password from the console, never through arguments
+   or files: `docker compose --env-file .env --profile core-preview --profile dashboard exec dashboard node dist/dashboard/web/admin-cli.js set-password`.
+   The same command offers `revoke-sessions` and `unlock` (clears the login
+   throttle).
+
+Until the HTTPS proxy (D8) exists, the panel listens only on the server's
+loopback address (`NANOCLAW_DASHBOARD_LOOPBACK_PORT`, default 18080); reach it
+through an SSH tunnel. The session cookie is `Secure`, so a browser needs
+HTTPS; the loopback port is for API checks, not for daily use.

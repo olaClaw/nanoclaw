@@ -44,6 +44,9 @@ services:
       SIGNAL_TCP_PORT: '7583'
       SIGNAL_DATA_DIR: /srv/nanoclaw/signal
       SIGNAL_ATTACHMENT_DIR: /srv/nanoclaw/signal-outbox
+      # Host side of the dashboard boundary. Harmless without the dashboard
+      # profile: nothing else can reach the volume.
+      NANOCLAW_DASHBOARD_ADMIN_SOCKET: /run/nanoclaw-admin/admin.sock
     extra_hosts:
       - host.docker.internal:host-gateway
     volumes:
@@ -100,7 +103,62 @@ services:
         target: /var/run/docker.sock
         bind:
           create_host_path: false
+      - type: volume
+        source: dashboard-admin
+        target: /run/nanoclaw-admin
     networks: [gateway, channels]
+
+  # Administrative dashboard (opt in with `--profile dashboard`). Same image
+  # as the host, another entry point and UID, and none of the host's mounts:
+  # only its private state and the admin socket volume. Loopback-only port
+  # until the HTTPS proxy (D8) sits in front of it.
+  dashboard:
+    profiles: [dashboard]
+    image: ${NANOCLAW_HOST_IMAGE:?Set NANOCLAW_HOST_IMAGE to a reviewed image}
+    command: [node, dist/dashboard/web/main.js]
+    depends_on:
+      nanoclaw:
+        condition: service_healthy
+    init: true
+    restart: unless-stopped
+    read_only: true
+    user: '1001:1001'
+    # Group of the host process, which owns the socket directory (0750) and socket (0660).
+    group_add: ['1000']
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:mode=1777
+    environment:
+      NANOCLAW_DASHBOARD_STATE_DIR: /srv/nanoclaw/dashboard
+      NANOCLAW_DASHBOARD_ADMIN_SOCKET: /run/nanoclaw-admin/admin.sock
+      # Required by the service, which refuses to start without an https
+      # origin; not `:?` here, so installs without this profile still validate.
+      NANOCLAW_DASHBOARD_ORIGIN: ${NANOCLAW_DASHBOARD_ORIGIN:-}
+      NANOCLAW_DASHBOARD_PORT: '8080'
+    volumes:
+      - type: bind
+        source: /srv/nanoclaw/dashboard
+        target: /srv/nanoclaw/dashboard
+        bind:
+          create_host_path: false
+      - type: volume
+        source: dashboard-admin
+        target: /run/nanoclaw-admin
+    ports:
+      - 127.0.0.1:${NANOCLAW_DASHBOARD_LOOPBACK_PORT:-18080}:8080
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:8080/api/v1/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    networks: [dashboard]
 
   signal-cli:
     profiles: [core-preview]
@@ -294,6 +352,8 @@ secrets:
 volumes:
   onecli-pgdata:
   onecli-data:
+  # Holds only the admin socket; recreated empty is fine, never backed up.
+  dashboard-admin:
 
 networks:
   gateway:
@@ -307,3 +367,6 @@ networks:
   agent-egress:
     name: nanoclaw-egress
     internal: true
+  # The dashboard alone; the proxy (D8) joins it later.
+  dashboard:
+    driver: bridge
