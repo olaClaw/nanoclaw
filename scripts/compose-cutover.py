@@ -14,7 +14,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 
 MODULE_PATH = Path(__file__).with_name('compose-recovery.py')
@@ -49,10 +49,7 @@ def valid_staged_members(stage):
             info = item.lstat()
             relative = item.relative_to(stage).as_posix()
             if stat.S_ISLNK(info.st_mode):
-                target = PurePosixPath(os.readlink(item))
-                if (not relative.startswith('state/data/') or
-                        not target.is_relative_to(PurePosixPath('/app')) or
-                        '..' in target.parts):
+                if not RECOVERY.symlink_allowed(relative, os.readlink(item)):
                     RECOVERY.fail('stage_link_unsafe')
             elif not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
                 RECOVERY.fail('stage_member_unsafe')

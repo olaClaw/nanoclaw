@@ -18,6 +18,7 @@ const envConfig = readEnvFile([
   'CONTAINER_PIDS_LIMIT',
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
+  'NANOCLAW_MCP_PLAIN_HTTP_HOSTS',
   'NANOCLAW_AGENT_ASSETS_IN_IMAGE',
   'WEBHOOK_PORT',
 ]);
@@ -118,6 +119,21 @@ export const CONTAINER_PIDS_LIMIT = process.env.CONTAINER_PIDS_LIMIT ?? envConfi
 export const EGRESS_LOCKDOWN = (process.env.NANOCLAW_EGRESS_LOCKDOWN || envConfig.NANOCLAW_EGRESS_LOCKDOWN) === 'true';
 export const EGRESS_NETWORK =
   process.env.NANOCLAW_EGRESS_NETWORK || envConfig.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
+
+/**
+ * Hosts an agent may reach over plain HTTP for an MCP server, besides loopback.
+ * Meant for Compose service names on the internal agent network (e.g. the
+ * read-only mail and calendar brokers). Only single-label names are accepted,
+ * so a public host can never be listed; anything else is ignored.
+ */
+export const MCP_PLAIN_HTTP_HOSTS: readonly string[] = (
+  process.env.NANOCLAW_MCP_PLAIN_HTTP_HOSTS ||
+  envConfig.NANOCLAW_MCP_PLAIN_HTTP_HOSTS ||
+  ''
+)
+  .split(',')
+  .map((host) => host.trim().toLowerCase())
+  .filter((host) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(host));
 
 // Resolve when the listener starts so a late process override still wins.
 export function getWebhookPort(): number {

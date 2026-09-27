@@ -11,7 +11,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { DEFAULT_MODEL, FAST_MODE, GROUPS_DIR, TIMEZONE } from './config.js';
+import { DEFAULT_MODEL, FAST_MODE, GROUPS_DIR, MCP_PLAIN_HTTP_HOSTS, TIMEZONE } from './config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { isValidTimezone } from './timezone.js';
@@ -155,8 +155,12 @@ export function parseMcpServerConfig(input: Record<string, unknown>): McpServerC
       throw new Error('url must be a valid HTTP(S) URL', { cause: err });
     }
     const loopback = ['localhost', '127.0.0.1', '[::1]', 'host.docker.internal'].includes(parsed.hostname);
-    if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && loopback)) {
-      throw new Error('url must use HTTPS (plain HTTP is allowed only for localhost and host.docker.internal)');
+    // Compose service names on the internal agent network (NANOCLAW_MCP_PLAIN_HTTP_HOSTS).
+    const internalService = MCP_PLAIN_HTTP_HOSTS.includes(parsed.hostname);
+    if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && (loopback || internalService))) {
+      throw new Error(
+        'url must use HTTPS (plain HTTP is allowed only for localhost, host.docker.internal and configured internal service hosts)',
+      );
     }
     if (parsed.username || parsed.password || parsed.hash) {
       throw new Error('url must not contain credentials or fragments; use the credential gateway');
