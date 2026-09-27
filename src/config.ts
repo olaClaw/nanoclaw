@@ -48,6 +48,10 @@ export const DEFAULT_AGENT_PROVIDER = (
 // next container start for every group that has not set one.
 export const DEFAULT_MODEL = process.env.NANOCLAW_DEFAULT_MODEL || envConfig.NANOCLAW_DEFAULT_MODEL || '';
 
+// Unix socket of the dashboard's host-side administrative boundary. Off unless
+// set; Compose points it at a directory mounted only into the dashboard.
+export const DASHBOARD_ADMIN_SOCKET = process.env.NANOCLAW_DASHBOARD_ADMIN_SOCKET || '';
+
 // Fast serving tier for every agent container: faster output at a higher
 // per-token price. Off unless explicitly turned on, and only by '1' or 'true' —
 // a typo must not silently start charging the faster rate.

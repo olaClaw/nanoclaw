@@ -34,14 +34,21 @@ Companion documents in this directory:
   `src/dashboard/fixtures/`, and the threat model in
   [threat-model.md](threat-model.md). No dashboard service, host boundary or
   authentication exists yet.
+- **D1 done (read-only):** the host boundary in `src/dashboard/host/` serves
+  overview, agents, agent detail, channels, sessions and model settings over a
+  Unix socket (`NANOCLAW_DASHBOARD_ADMIN_SOCKET`, off by default). It
+  re-validates every request and response against the contract, resolves
+  public IDs server-side and answers `not_implemented` for operations that
+  need the root-side operations service (releases, backups, jobs,
+  mutations).
 
 ## Next step
 
-D1 and D2 on a dedicated branch: the narrow host-side boundary (named
-operations, request and response validation against the contract, projections
-over the synthetic install with canary tests) and the password login/session
-layer. Decide there how the dashboard service reaches the host boundary
-(socket or internal network) without mounting Docker, `ncl.sock` or the DB.
+D2: the dashboard service itself, a separate web process that talks to the host
+only through the admin socket. It holds password login (hash and rate limit),
+server-side sessions, CSRF and Origin checks and the reauth window, and
+forwards authorized calls to the boundary. Then add it to Compose with the
+socket directory as its only mount, and rehearse on the test LXC.
 
 ## Agreed product behavior
 
@@ -189,3 +196,4 @@ repository README.
 | 2026-09-27 | Added a public, release-verified installation/configuration guide as a whole-stack deliverable, including tested legacy-to-Compose and Compose-to-Compose migration procedures; no guide commands or runtime behavior changed. | Write and rehearse each supported guide path when the dashboard and installation flow stabilize. |
 | 2026-09-27 | Moved the dashboard plan, design, API contract, backlog/tests and static prototype into `docs/dashboard/`; owner is now Claude Code. No runtime, server, image or credential changed. | Persistent job state for the release-update controller, then D0–D2. |
 | 2026-09-27 | D0: contract in `src/dashboard/contract/` (dependency-free strict schema language, 25 endpoints with request/response schemas, authorization matrix, HMAC public IDs, examples), synthetic install and canaries in `src/dashboard/fixtures/`, threat model T1–T20. 25 contract tests. No runtime change. | D1/D2: host boundary and login. |
+| 2026-09-27 | D1: host boundary over a Unix socket (HTTP framing, 64 KiB bodies, 15 s timeouts, `no-store`), read-only projections, per-install public-ID key in `data/dashboard/`, off unless `NANOCLAW_DASHBOARD_ADMIN_SOCKET` is set. 17 new tests (canaries, tampering, framing, key file). | D2: dashboard service and login. |

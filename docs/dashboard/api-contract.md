@@ -19,6 +19,11 @@ they disagree, the code and its tests win. D0 settled these points:
   printable-only; lists hold at most 200 items with a cursor.
 - Export/import payloads stay `draft` until D5 settles the key delivery and
   upload framing.
+- The dashboard reaches the host only through a Unix socket in its own
+  directory (`NANOCLAW_DASHBOARD_ADMIN_SOCKET`), never a network port.
+  Session endpoints and `health` are served by the dashboard itself; the
+  host boundary refuses them. Lists accept only `?cursor=`; everything else is
+  `invalid_query`.
 
 ## Observations from the current code
 
