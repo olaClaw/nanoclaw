@@ -27,6 +27,7 @@ import { validate } from '../contract/schema.js';
 import { DEFAULT_PARAMS, hashPassword, needsRehash, verifyPassword, type ScryptParams } from './password.js';
 import { LoginThrottle, SessionStore, type Session } from './sessions.js';
 import type { DashboardState } from './state.js';
+import { APP_CSS, APP_JS, INDEX_HTML, UI_CSP } from './ui.js';
 
 export const COOKIE = '__Host-nanoclaw_session';
 export const MAX_BODY_BYTES = 64 * 1024;
@@ -234,6 +235,17 @@ export function createDashboardServer(config: DashboardConfig): http.Server {
   }
 
   return http.createServer((request, response) => {
+    const asset = request.method === 'GET' || request.method === 'HEAD' ? uiAsset(request.url) : null;
+    if (asset) {
+      response.writeHead(200, {
+        ...HEADERS,
+        'content-security-policy': UI_CSP,
+        'content-type': asset.type,
+        'content-length': Buffer.byteLength(asset.body),
+      });
+      response.end(request.method === 'HEAD' ? undefined : asset.body);
+      return;
+    }
     const id = requestId();
     const send = (reply: Reply, endpoint: Endpoint | null): void => {
       const payload = reply.status === 204 || reply.body === undefined ? '' : JSON.stringify(reply.body);
@@ -277,6 +289,17 @@ export function createDashboardServer(config: DashboardConfig): http.Server {
       },
     );
   });
+}
+
+const UI_ASSETS: Readonly<Record<string, { type: string; body: string }>> = {
+  '/': { type: 'text/html; charset=utf-8', body: INDEX_HTML },
+  '/app.js': { type: 'text/javascript; charset=utf-8', body: APP_JS },
+  '/app.css': { type: 'text/css; charset=utf-8', body: APP_CSS },
+};
+
+/** The static UI files; no query strings, no other paths. */
+function uiAsset(url: string | undefined): { type: string; body: string } | null {
+  return Object.hasOwn(UI_ASSETS, url ?? '') ? UI_ASSETS[url!] : null;
 }
 
 /** Forward to the host boundary over its Unix socket. */

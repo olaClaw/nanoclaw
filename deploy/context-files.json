@@ -105,6 +105,7 @@
     "src/dashboard/web/server.ts",
     "src/dashboard/web/sessions.ts",
     "src/dashboard/web/state.ts",
+    "src/dashboard/web/ui.ts",
     "src/db/agent-groups.ts",
     "src/db/compose.ts",
     "src/db/connection.ts",
