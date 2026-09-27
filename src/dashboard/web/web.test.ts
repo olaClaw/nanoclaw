@@ -17,7 +17,7 @@ import type { HostSources } from '../host/projections.js';
 import { runAdminCommand } from './admin-cli.js';
 import { dashboardConfigFromEnv } from './main.js';
 import { hashPassword, needsRehash, passwordProblem, verifyPassword, type ScryptParams } from './password.js';
-import { COOKIE, createDashboardServer, socketForward, type Forward } from './server.js';
+import { COOKIE, OPS_ENDPOINTS, createDashboardServer, socketForward, type Forward } from './server.js';
 import { ABSOLUTE_MS, IDLE_MS, REAUTH_MS, SessionStore } from './sessions.js';
 import { DashboardState } from './state.js';
 import { APP_JS, INDEX_HTML } from './ui.js';
@@ -31,6 +31,26 @@ function privateDir(prefix: string): string {
   fs.chmodSync(directory, 0o700);
   return directory;
 }
+
+describe('operations routing', () => {
+  it('sends every endpoint the operations service owns to it, and nothing else', () => {
+    expect([...OPS_ENDPOINTS].sort()).toEqual(
+      [
+        'backup_create',
+        'backup_export',
+        'backup_key',
+        'backup_key_saved',
+        'backup_verify',
+        'backups',
+        'import_apply',
+        'import_preflight',
+        'job',
+        'releases',
+        'update',
+      ].sort(),
+    );
+  });
+});
 
 describe('password hashing', () => {
   it('stores a versioned scrypt record and verifies only the right password', async () => {

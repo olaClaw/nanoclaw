@@ -57,6 +57,8 @@ export const OPS_ENDPOINTS = new Set([
   'update',
   'backup_create',
   'backup_verify',
+  'backup_key',
+  'backup_key_saved',
   'backup_export',
   'import_preflight',
   'import_apply',

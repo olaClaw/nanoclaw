@@ -32,7 +32,14 @@ const FORBIDDEN_FIELD =
 /** Input-only request fields: they never appear in a response (checked below). */
 const INPUT_FIELDS = new Set(['$.password', '$.value', '$.endpoint']);
 /** The CSRF token is the session's own anti-forgery value, not a runtime secret. */
-const RESPONSE_FIELDS = new Set(['$.csrf_token']);
+const RESPONSE_FIELDS = new Set([
+  '$.csrf_token',
+  // A yes/no flag about the backup key, never the key itself.
+  '$.items[].key_on_host',
+  '$.key_on_host',
+]);
+/** The backup key is shown once by operator decision; only `backup_key` may carry it. */
+const SECRET_RESPONSE = { endpoint: 'backup_key', path: '$.key' };
 
 describe('schema language', () => {
   const sample = object({
@@ -98,7 +105,12 @@ describe('dashboard API contract', () => {
           const field = path.split('.').at(-1)!.replace('[]', '');
           if (
             FORBIDDEN_FIELD.test(field) &&
-            !(schema === endpoint.request ? INPUT_FIELDS : RESPONSE_FIELDS).has(path)
+            !(schema === endpoint.request ? INPUT_FIELDS : RESPONSE_FIELDS).has(path) &&
+            !(
+              schema === endpoint.response &&
+              endpoint.name === SECRET_RESPONSE.endpoint &&
+              path === SECRET_RESPONSE.path
+            )
           ) {
             offending.push(`${endpoint.name} ${path}`);
           }
@@ -141,6 +153,7 @@ describe('dashboard API contract', () => {
       failure_category: 'derived_image_not_refreshed',
       rollback: 'healthy',
       release: { from_revision: 'a'.repeat(40), to_revision: 'b'.repeat(40), to_version: '2.4.0' },
+      backup: null,
       phases: [{ phase: 'preflight', at: '2026-01-15T12:00:00Z' }],
       started_at: '2026-01-15T12:00:00Z',
       updated_at: '2026-01-15T12:05:00Z',

@@ -50,7 +50,7 @@ export const INDEX_HTML = `<!doctype html>
           <button type="button" data-view="backups">Backup</button>
           <button type="button" data-view="updates">Aggiornamenti</button>
         </nav>
-        <p class="aside-note">Sola lettura: le operazioni arriveranno nelle prossime versioni.</p>
+        <p class="aside-note">Dal pannello puoi creare backup; le altre operazioni arriveranno nelle prossime versioni.</p>
       </aside>
       <main>
         <header>
@@ -123,6 +123,12 @@ dd { margin: 0; font-weight: 600; }
 .login-card { width: min(420px, 100%); display: grid; gap: 14px; }
 .field { display: grid; gap: 5px; font-weight: 650; }
 .field input { border: 1px solid #abc0b0; border-radius: 9px; padding: 10px 11px; font: inherit; }
+.actions { display: flex; flex-wrap: wrap; gap: 9px; margin: 12px 0; }
+.inline-form { display: grid; gap: 10px; margin-bottom: 16px; }
+.key-card { border-color: #ead8a3; background: var(--warning-bg); margin-bottom: 16px; }
+.secret { display: block; padding: 12px; border-radius: 9px; background: #fff; border: 1px solid var(--line); font: 600 .95rem/1.4 ui-monospace, monospace; word-break: break-all; user-select: all; }
+.choice { display: flex; align-items: center; gap: 9px; margin-top: 10px; }
+.primary:disabled { opacity: .5; cursor: not-allowed; }
 @media (max-width: 800px) {
   .shell { display: block; }
   aside { padding: 15px; }
@@ -151,6 +157,9 @@ export const APP_JS = String.raw`'use strict';
     not_implemented: 'Non ancora disponibile: arriverà con il servizio operativo.',
     rate_limited: 'Troppe richieste: attendi un minuto.',
     upstream_unavailable: 'Il servizio NanoClaw non risponde.',
+    operation_in_progress: 'Un backup o un aggiornamento è già in corso.',
+    key_not_on_host: 'La chiave non è più sul server.',
+    reauth_required: 'Serve di nuovo la password.',
     ops_unavailable: 'Servizio operativo non attivo su questo server: backup e aggiornamenti restano disponibili da terminale.',
     upstream_invalid: 'Risposta del servizio non valida.',
     release_unknown: 'Release installata non determinabile.',
@@ -366,20 +375,111 @@ export const APP_JS = String.raw`'use strict';
       wide(null, el('p', { class: 'muted' }, 'L\'avvio di un aggiornamento dal pannello arriverà in una prossima versione; oggi si avvia da terminale.'))));
   }
 
+  // Dangerous operations need the password again (reauth window on the server).
+  function askPassword(target, label, onConfirm) {
+    const input = el('input', { type: 'password', autocomplete: 'current-password', minlength: '12', maxlength: '1024', required: '' });
+    const message = el('p', { class: 'message error', role: 'alert' });
+    const form = el('form', { class: 'card wide inline-form' },
+      el('p', {}, label), el('label', { class: 'field' }, 'Password della dashboard', input),
+      el('div', { class: 'actions' }, el('button', { class: 'primary', type: 'submit' }, 'Conferma'),
+        el('button', { class: 'secondary', type: 'button', onclick: () => form.remove() }, 'Annulla')), message);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const result = await api('POST', '/session/reauth', { password: input.value });
+      input.value = '';
+      if (result.status !== 200) { message.textContent = ERRORS[result.code] || 'Password non accettata.'; return; }
+      form.remove();
+      await onConfirm();
+    });
+    target.prepend(form);
+    input.focus();
+  }
+
+  function showKey(target, backup, key) {
+    const code = el('code', { class: 'secret' }, key);
+    const saved = el('input', { type: 'checkbox', id: 'key-saved' });
+    const confirmButton = el('button', { class: 'primary', type: 'button', disabled: '' }, 'Cancella la chiave dal server');
+    saved.addEventListener('change', () => { confirmButton.disabled = !saved.checked; });
+    const box = el('article', { class: 'card wide key-card' },
+      el('h2', {}, 'Chiave del backup: salvala ora'),
+      el('p', {}, 'Questa chiave serve per ripristinare il backup. Salvala nel password manager: dopo la conferma viene cancellata dal server e il pannello non potrà mostrarla di nuovo.'),
+      code,
+      el('div', { class: 'actions' },
+        el('button', { class: 'secondary', type: 'button', onclick: async () => {
+          try { await navigator.clipboard.writeText(key); say('Chiave copiata negli appunti.'); } catch { say('Copia non riuscita: seleziona il testo a mano.', true); }
+        } }, 'Copia')),
+      el('label', { class: 'choice' }, saved, el('span', {}, 'Ho salvato la chiave nel password manager')),
+      el('div', { class: 'actions' }, confirmButton));
+    confirmButton.addEventListener('click', async () => {
+      const result = await api('POST', '/backups/' + encodeURIComponent(backup) + '/key/saved', { confirm: true });
+      if (result.status !== 200) { say(ERRORS[result.code] || 'Conferma non riuscita.', true); return; }
+      code.textContent = '';
+      box.remove();
+      await render('backups');
+      say('Chiave cancellata dal server.');
+    });
+    target.prepend(box);
+  }
+
+  async function revealKey(target, backup) {
+    const result = await api('POST', '/backups/' + encodeURIComponent(backup) + '/key', { confirm: true });
+    if (result.status === 403 && result.code === 'reauth_required') {
+      askPassword(target, 'Per mostrare la chiave inserisci di nuovo la password.', () => revealKey(target, backup));
+      return;
+    }
+    if (result.status !== 200) { say(ERRORS[result.code] || 'Chiave non disponibile.', true); return; }
+    showKey(target, result.data.backup, result.data.key);
+  }
+
+  async function followJob(target, jobId) {
+    const progress = el('article', { class: 'card wide' }, el('h2', {}, 'Backup in corso'),
+      el('p', { class: 'muted' }, 'I servizi si fermano per qualche minuto durante la copia. Puoi restare su questa pagina.'));
+    target.prepend(progress);
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      const result = await api('GET', '/jobs/' + encodeURIComponent(jobId));
+      if (result.status !== 200) { progress.remove(); return fail(target, result); }
+      const j = result.data;
+      if (j.outcome === 'running') continue;
+      progress.remove();
+      if (j.outcome !== 'succeeded' || !j.backup) {
+        say('Backup non riuscito: ' + (j.failure_category ? j.failure_category.replaceAll('_', ' ') : 'errore') + '.', true);
+        return render('backups');
+      }
+      say('Backup creato e verificato.');
+      await revealKey(target, j.backup);
+      return;
+    }
+  }
+
+  async function startBackup(target) {
+    const result = await api('POST', '/backups', { confirm: true });
+    if (result.status === 403 && result.code === 'reauth_required') {
+      askPassword(target, 'Per creare un backup inserisci di nuovo la password. I servizi si fermeranno per qualche minuto.', () => startBackup(target));
+      return;
+    }
+    if (result.status !== 202 && result.status !== 200) { say(ERRORS[result.code] || 'Backup non avviato.', true); return; }
+    await followJob(target, result.data.job.id);
+  }
+
   async function renderBackups(view, cursor) {
     const result = await api('GET', '/backups' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''));
     if (result.status !== 200) return fail(view, result);
     const b = result.data;
+    if (!cursor) {
+      view.append(el('div', { class: 'actions' },
+        el('button', { class: 'primary', type: 'button', onclick: () => startBackup(view) }, 'Crea backup')));
+    }
     view.append(wide(null, b.items.length ? b.items.map((item) => row(
       'Backup del ' + when(item.created_at),
-      'Release ' + item.release_revision.slice(0, 8) + ' · ' + size(item.size_bytes),
-      status(item.verification),
+      'Release ' + item.release_revision.slice(0, 8) + ' · ' + size(item.size_bytes) + (item.key_on_host ? ' · chiave ancora sul server' : ''),
+      item.key_on_host
+        ? el('button', { class: 'secondary', type: 'button', onclick: () => revealKey(view, item.id) }, 'Mostra chiave')
+        : status(item.verification),
     )) : el('p', { class: 'muted' }, 'Nessun backup.')));
     if (b.next_cursor) {
       const more = el('button', { class: 'secondary', type: 'button', onclick: () => { more.remove(); renderBackups(view, b.next_cursor); } }, 'Carica altri');
       view.append(more);
-    } else if (!cursor) {
-      view.append(wide(null, el('p', { class: 'muted' }, 'Creazione, verifica ed esportazione dal pannello arriveranno in una prossima versione.')));
     }
   }
 

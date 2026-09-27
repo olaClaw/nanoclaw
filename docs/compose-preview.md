@@ -216,20 +216,25 @@ SSH tunnel. Browsers use HTTPS through the `proxy` service of the same profile.
 
 The dashboard's backup and update screens are served by a small root-side
 service, `scripts/compose-ops.py`, which runs on the Compose host outside
-Docker (read-only for now: installed and candidate release, backups, update
-jobs). It reads the release manifest, the release-update job state and the
-backup folders, never keys or archives, and answers on a Unix socket in
-`/var/lib/nanoclaw-ops/sock/` that only the dashboard's group (61001) can open;
-the dashboard mounts that directory read-only. Without it the screens say the
-service is not active and the CLI tools keep working as before.
+Docker. It shows the installed and candidate release, update jobs and
+backups, and runs backups started from the panel: `compose-recovery.py
+backup --apply` under the release-update lock, so a backup and an update never
+overlap, whichever side starts them. After a backup the panel shows its key
+once; when the operator confirms it is saved in a password manager, the
+service shreds it from the server. Backups whose key is still on the server
+are flagged in the list. The service answers on a Unix socket in
+`/var/lib/nanoclaw-ops/sock/` that only the dashboard's group (61001) can
+open; the dashboard mounts that directory read-only. Without it the screens
+say the service is not active and the CLI tools keep working as before.
 
-1. Copy `scripts/compose-ops.py` from a reviewed checkout to
-   `/usr/local/lib/nanoclaw/compose-ops.py` (root-owned, `0644`) and check its
-   SHA-256 against that checkout.
-2. `install -d -m 750 -o root -g 61001 /var/lib/nanoclaw-ops/sock`. Point
-   `/var/lib/nanoclaw-ops/{backups,release-backups,candidates}` at the backup
-   root, the release-update control root and a directory of verified candidate
-   manifests (symlinks or edit the unit's paths).
+1. Copy `scripts/compose-ops.py` and `scripts/compose-recovery.py` from a
+   reviewed checkout to `/usr/local/lib/nanoclaw/` (root-owned, `0644`) and
+   check their SHA-256 against that checkout.
+2. `install -d -m 750 -o root -g 61001 /var/lib/nanoclaw-ops/sock` and
+   `install -d -m 700 /var/lib/nanoclaw-ops/candidates /var/lib/nanoclaw-ops/jobs`.
+   Link `/var/lib/nanoclaw-ops/{project,backups,keys,release-backups}` to the
+   Compose checkout, the backup root, the key root and the release-update
+   control root.
 3. Install `deploy/ops/nanoclaw-ops.service` in `/etc/systemd/system/`, then
    `systemctl daemon-reload && systemctl enable --now nanoclaw-ops`.
 4. Recreate the `dashboard` service so it sees the socket.

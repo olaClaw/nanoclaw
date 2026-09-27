@@ -67,10 +67,10 @@ Companion documents in this directory:
 
 ## Next step
 
-Install the operations service on the production host and check the Backup
-and Updates screens; then its first mutating operations (backup create and
-verify, release update from a verified candidate) on the same job/lock as
-the CLI, with reauth and confirmation, rehearsed on the test LXC first.
+Deploy backups from the panel on the production host (the service's scripts
+and unit, then check a real backup with the one-time key); then release
+updates from the panel from a verified candidate, on the same lock, and the
+agent operations (D6).
 
 ## Agreed product behavior
 
@@ -223,3 +223,4 @@ repository README.
 | 2026-09-27 | D3: read-only UI served by the dashboard service; structural tests (CSP, no inline code, no `innerHTML`/storage, fetch only to `/api/v1`) and a headless Chromium walk-through (wrong password, login, every screen, agent detail, logout; no console errors, cookie not readable by script). | D8 (HTTPS), then the operations service. |
 | 2026-09-27 | D8 Compose part: NPM proxy service, backup rule for Let's Encrypt links, docs; rehearsal over TLS on the test LXC. Production enablement waits for the operator (DNS record, NPM admin, DNS token in NPM only). | Release, then enable on the production host with the operator. |
 | 2026-09-27 | Operations service, read-only slice: `scripts/compose-ops.py` (root, Unix socket for group 61001; releases, backups, update jobs; HMAC backup IDs with the dashboard key), systemd unit `deploy/ops/nanoclaw-ops.service`, dashboard routes those endpoints to it and reports `ops_unavailable` when it is absent. Python tests plus a cross-language test (Python service behind the dashboard, validated by the TypeScript contract). | Install on the production host; then mutating operations. |
+| 2026-09-27 | Backups from the panel (D4): the operations service starts `compose-recovery.py backup --apply` as a job under the release-update lock, records it in a private jobs directory, and exposes the key once (`POST …/key`, reauth) until the operator confirms it is saved (`POST …/key/saved`, shredded). Contract: `backup` on jobs, `key_on_host` on backups, the two key endpoints; `backup_key` is the only response allowed to carry a secret. UI: create button with password prompt, progress, one-time key card with copy and confirmation, key-on-server flag. 13 Python tests. | Deploy on the production host. |

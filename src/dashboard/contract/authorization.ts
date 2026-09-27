@@ -80,6 +80,8 @@ export const POLICIES: Readonly<Record<string, EndpointPolicy>> = {
   update: dangerous({ lock: 'maintenance' }),
   backup_create: dangerous({ lock: 'maintenance' }),
   backup_verify: mutation({ confirm: false }),
+  backup_key: dangerous(),
+  backup_key_saved: dangerous(),
   backup_export: dangerous(),
   import_preflight: dangerous({ confirm: false }),
   import_apply: dangerous({ lock: 'maintenance' }),
