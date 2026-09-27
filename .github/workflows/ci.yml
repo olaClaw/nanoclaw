@@ -358,4 +358,37 @@ jobs:
           name: compose-release-${{ github.sha }}
           path: ${{ runner.temp }}/compose-release.json
           if-no-files-found: error
+
+  # Publish the verified manifest as a GitHub release, so a Compose host's
+  # operations service can offer it as an update candidate without a token.
+  # Separate job: only this one may write repository contents, and it sees
+  # nothing but the manifest the publish job already checked.
+  release-manifest:
+    needs: [publish-compose]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: compose-release-${{ github.sha }}
+          path: ${{ runner.temp }}/manifest
+      - name: Check and publish the release manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          file="$RUNNER_TEMP/manifest/compose-release.json"
+          node scripts/compose-release.mjs check --file "$file"
+          revision="$(jq -er .revision "$file")"
+          [[ "$revision" = "$GITHUB_SHA" ]]
+          tag="compose-${GITHUB_SHA:0:8}"
+          gh release create "$tag" "$file" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Compose release ${GITHUB_SHA:0:8}" \
+            --notes "Digest-pinned image manifest for the Compose stack at ${GITHUB_SHA}. Hosts verify revision, tree and image labels before installing it."
           retention-days: 14

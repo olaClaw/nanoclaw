@@ -67,10 +67,10 @@ Companion documents in this directory:
 
 ## Next step
 
-Deploy backups from the panel on the production host (the service's scripts
-and unit, then check a real backup with the one-time key); then release
-updates from the panel from a verified candidate, on the same lock, and the
-agent operations (D6).
+Deploy release updates from the panel on the production host (the third
+script, the candidates timer, the first release published with the new job),
+and install the next release from the panel as the real test. Then the
+provider/model switch (D3a) and the remaining agent operations.
 
 ## Agreed product behavior
 
@@ -225,3 +225,4 @@ repository README.
 | 2026-09-27 | Operations service, read-only slice: `scripts/compose-ops.py` (root, Unix socket for group 61001; releases, backups, update jobs; HMAC backup IDs with the dashboard key), systemd unit `deploy/ops/nanoclaw-ops.service`, dashboard routes those endpoints to it and reports `ops_unavailable` when it is absent. Python tests plus a cross-language test (Python service behind the dashboard, validated by the TypeScript contract). | Install on the production host; then mutating operations. |
 | 2026-09-27 | Backups from the panel (D4): the operations service starts `compose-recovery.py backup --apply` as a job under the release-update lock, records it in a private jobs directory, and exposes the key once (`POST …/key`, reauth) until the operator confirms it is saved (`POST …/key/saved`, shredded). Contract: `backup` on jobs, `key_on_host` on backups, the two key endpoints; `backup_key` is the only response allowed to carry a secret. UI: create button with password prompt, progress, one-time key card with copy and confirmation, key-on-server flag. 13 Python tests. | Deploy on the production host. |
 | 2026-09-27 | D6, first operation: agent restart from the panel. The host boundary resolves the public ID and calls the same restart as `ncl groups restart` (kill running containers, respawn those with pending work); direct result `{agent, restarted}`; a second restart of the same agent while one runs is `restart_in_progress`. UI: button in the agent detail with an inline confirmation. 3 new tests; checked in headless Chromium. | Release updates from the panel (D7), then provider/model switch (D3a). |
+| 2026-09-27 | Release updates from the panel (D7): CI job `release-manifest` (own job, `contents: write` only) publishes each verified manifest as GitHub release `compose-<rev8>`; `compose-ops.py fetch-candidates` (hourly timer, the only networked unit) keeps descendants of the installed revision after checking the manifest shape, the tag/revision match and the download host, and fetches the revision as the checkout owner; the operations service runs pull, backup (under the lock) and `compose-release-update.py` (production or synthetic mode from `/etc/default/nanoclaw-ops`), reporting succeeded/rolled back/rollback failed. UI: Install button with confirmation, reauth, progress and the pre-update backup key. 27 Python tests; checked in headless Chromium with fake tools. Operator chose the public GitHub release for candidates. | Deploy on the production host. |

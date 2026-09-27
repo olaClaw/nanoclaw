@@ -39,6 +39,7 @@ import stat
 import subprocess
 import sys
 import threading
+import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -63,6 +64,8 @@ LOCK_FILE = '.compose-release-update.lock'
 OPS_JOB = re.compile(r'[0-9a-f]{16}\Z')
 KEY = re.compile(r'[0-9a-f]{64}\Z')
 BACKUP_PHASES = {'backup', 'done'}
+UPDATE_PHASES = {'pull', 'backup', 'update', 'done'}
+UPDATE_MODES = {'production': '--confirm-production', 'synthetic': '--confirm-synthetic'}
 
 
 class OpsError(Exception):
@@ -126,7 +129,8 @@ def shred(path):
 
 class Sources:
     def __init__(self, state_root, backup_root, control_root, candidates, id_key,
-                 key_root=None, project_root=None, jobs_dir=None, recovery_script=None):
+                 key_root=None, project_root=None, jobs_dir=None, recovery_script=None,
+                 update_script=None, update_mode=None):
         self.state_root = Path(state_root).resolve()
         self.backup_root = Path(backup_root).resolve()
         self.control_root = Path(control_root).resolve()
@@ -140,6 +144,8 @@ class Sources:
         self.project_root = Path(project_root).resolve() if project_root else None
         self.jobs_dir = Path(jobs_dir) if jobs_dir else None
         self.recovery_script = Path(recovery_script) if recovery_script else None
+        self.update_script = Path(update_script) if update_script else None
+        self.update_mode = update_mode if update_mode in UPDATE_MODES else None
         self.running = threading.Lock()
 
     def public_id(self, kind, internal):
@@ -216,15 +222,17 @@ class Sources:
         return jobs
 
     def candidate(self, installed):
-        """The newest well-formed manifest in the candidates directory newer than the installed one."""
+        """The most recently stored manifest in the candidates directory, when it differs from the installed one."""
         if not self.candidates or not self.candidates.is_dir():
             return None
-        best = None
-        for path in sorted(self.candidates.glob('*.json')):
+        found = []
+        for path in self.candidates.glob('*.json'):
             release = self.release(path)
             if release and (not installed or release['revision'] != installed['revision']):
-                best = release
-        return {**best, 'verified': True} if best else None
+                found.append((path.stat().st_mtime, release))
+        if not found:
+            return None
+        return {**max(found, key=lambda item: item[0])[1], 'verified': True}
 
     def backup_folders(self):
         """(public id, folder) for every backup folder with a well-formed manifest."""
@@ -321,17 +329,28 @@ class Sources:
         started = iso(record.get('started_utc'))
         backup = record.get('backup')
         category = record.get('failure_category')
+        kind = 'update' if record.get('kind') == 'update' else 'backup_create'
+        phases = UPDATE_PHASES if kind == 'update' else BACKUP_PHASES
+        release = None
+        if kind == 'update':
+            target = record.get('to_revision')
+            origin = record.get('from_revision')
+            version = record.get('to_version')
+            release = {'from_revision': origin if REVISION.fullmatch(str(origin or '')) else None,
+                       'to_revision': target if REVISION.fullmatch(str(target or '')) else None,
+                       'to_version': version if VERSION.fullmatch(str(version or '')) else None}
+        rollback = record.get('rollback')
         return {
             'id': 'job_' + record['job_id'],
-            'kind': 'backup_create',
+            'kind': kind,
             'backup': backup if isinstance(backup, str) and BACKUP_ID.fullmatch(backup) else None,
-            'phase': record.get('phase') if record.get('phase') in BACKUP_PHASES else 'backup',
+            'phase': record.get('phase') if record.get('phase') in phases else sorted(phases)[0],
             'outcome': record.get('outcome') if record.get('outcome') in OUTCOMES else 'failed',
             'failure_category': category if isinstance(category, str) and CODE.fullmatch(category) else None,
-            'rollback': None,
-            'release': None,
+            'rollback': rollback if rollback in ROLLBACKS else None,
+            'release': release,
             'phases': [{'phase': p['phase'], 'at': iso(p.get('at'))} for p in record.get('phases', [])
-                       if isinstance(p, dict) and p.get('phase') in BACKUP_PHASES and iso(p.get('at'))][:32],
+                       if isinstance(p, dict) and p.get('phase') in phases and iso(p.get('at'))][:32],
             'started_at': started,
             'updated_at': iso(record.get('updated_utc')) or started,
             'finished_at': iso(record.get('finished_utc')),
@@ -414,6 +433,222 @@ class Sources:
                 self.running.release()
 
 
+def run_tool(argv, timeout):
+    result = subprocess.run([sys.executable, *argv], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, timeout=timeout, check=False)
+    return result.returncode, result.stdout.decode('utf-8', 'replace').splitlines()
+
+
+def last_value(lines, key):
+    values = [line.split('=', 1)[1] for line in lines if line.startswith(key + '=')]
+    return values[-1] if values else None
+
+
+class UpdateRunner:
+    """Pull the candidate's images, back up, then run the release-update tool."""
+
+    def __init__(self, sources):
+        self.sources = sources
+
+    def start(self, revision):
+        src = self.sources
+        if not (src.key_root and src.project_root and src.jobs_dir and src.recovery_script
+                and src.update_script and src.update_mode and src.candidates):
+            raise OpsError(501, 'not_implemented')
+        manifest_path = src.candidates / f'{revision}.json'
+        manifest = private_json(manifest_path)
+        installed = src.release(src.state_root / 'release.json')
+        if not isinstance(manifest, dict) or manifest.get('revision') != revision or not installed:
+            raise OpsError(409, 'candidate_unknown')
+        if not src.running.acquire(blocking=False):
+            raise OpsError(409, 'operation_in_progress')
+        try:
+            lock = os.open(src.control_root / LOCK_FILE, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(lock)
+                raise OpsError(409, 'operation_in_progress')
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            os.close(lock)
+            job_id = secrets.token_hex(8)
+            at = now_utc()
+            record = {'job_id': job_id, 'kind': 'update', 'phase': 'pull', 'outcome': 'running',
+                      'failure_category': None, 'rollback': None, 'backup': None,
+                      'from_revision': installed['revision'], 'to_revision': revision,
+                      'to_version': manifest.get('version'), 'started_utc': at, 'updated_utc': at,
+                      'finished_utc': None, 'phases': [{'phase': 'pull', 'at': at}]}
+            write_private(src.ops_job_path(job_id), record)
+        except BaseException:
+            src.running.release()
+            raise
+        threading.Thread(target=self.run, args=(record, manifest_path, manifest), daemon=True).start()
+        return {'job': {'id': 'job_' + job_id, 'kind': 'update'}}
+
+    def phase(self, record, name):
+        at = now_utc()
+        record.update(phase=name, updated_utc=at)
+        record['phases'].append({'phase': name, 'at': at})
+        write_private(self.sources.ops_job_path(record['job_id']), record)
+
+    def run(self, record, manifest_path, manifest):
+        src = self.sources
+        outcome, category, rollback = 'failed', None, None
+        try:
+            for key in ('host', 'agent', 'brokers'):
+                pulled = subprocess.run(['docker', 'pull', '-q', manifest['images'][key]], stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800, check=False)
+                if pulled.returncode:
+                    category = 'image_pull_failed'
+                    return
+            self.phase(record, 'backup')
+            before = {folder.name for _, folder in src.backup_folders()}
+            lock = os.open(src.control_root / LOCK_FILE, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                code, lines = run_tool([str(src.recovery_script), 'backup', '--project-root', str(src.project_root),
+                                        '--state-root', str(src.state_root), '--backup-root', str(src.backup_root),
+                                        '--key-root', str(src.key_root), '--apply'], 4 * 3600)
+            except BlockingIOError:
+                category = 'operation_in_progress'
+                return
+            finally:
+                os.close(lock)
+            new = [folder for _, folder in src.backup_folders() if folder.name not in before]
+            if code or 'backup=verified' not in lines or len(new) != 1:
+                category = last_value(lines, 'failure_category') or 'backup_failed'
+                return
+            folder = new[0]
+            record['backup'] = src.public_id('backup', folder.name)
+            self.phase(record, 'update')
+            code, lines = run_tool([str(src.update_script), '--project-root', str(src.project_root),
+                                    '--state-root', str(src.state_root), '--release-manifest', str(manifest_path),
+                                    '--backup-dir', str(folder), '--key-file', str(src.key_path(folder)),
+                                    '--control-backup-root', str(src.control_root), UPDATE_MODES[src.update_mode],
+                                    '--apply'], 3 * 3600)
+            rollback = last_value(lines, 'rollback')
+            if code == 0 and last_value(lines, 'release_update') == 'healthy':
+                outcome = 'succeeded'
+            else:
+                category = last_value(lines, 'failure_category') or 'update_failed'
+                outcome = {'healthy': 'rolled_back', 'failed_manual_recovery_needed': 'rollback_failed'}.get(
+                    rollback, 'failed')
+        except Exception:
+            category = 'unexpected_error'
+        finally:
+            at = now_utc()
+            record.update(outcome=outcome, phase='done', updated_utc=at, finished_utc=at,
+                          failure_category=None if outcome == 'succeeded' else
+                          (category if CODE.fullmatch(str(category or '')) else 'unexpected_error'),
+                          rollback=rollback if rollback in ROLLBACKS else None)
+            record['phases'].append({'phase': 'done', 'at': at})
+            try:
+                write_private(src.ops_job_path(record['job_id']), record)
+            finally:
+                src.running.release()
+
+
+# ── Update candidates (separate, network-enabled timer unit) ──
+
+RELEASES_API = 'https://api.github.com/repos/{repo}/releases?per_page=20'
+TAG = re.compile(r'compose-([0-9a-f]{8})\Z')
+PINNED = re.compile(r'[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}\Z')
+IMAGE_KEYS = {'host', 'agent', 'brokers', 'onecli', 'postgres', 'signal'}
+MAX_MANIFEST = 16 * 1024
+
+
+def valid_manifest(blob):
+    """The release manifest shape the update tool accepts; it re-checks everything before applying."""
+    if len(blob) > MAX_MANIFEST:
+        return None
+    try:
+        data = json.loads(blob)
+    except ValueError:
+        return None
+    if not (isinstance(data, dict) and set(data) == {'schema', 'version', 'revision', 'tree', 'images'}
+            and data['schema'] == 'nanoclaw-compose-release/v1'
+            and isinstance(data['version'], str) and VERSION.fullmatch(data['version'])
+            and isinstance(data['revision'], str) and REVISION.fullmatch(data['revision'])
+            and isinstance(data['tree'], str) and REVISION.fullmatch(data['tree'])
+            and isinstance(data['images'], dict) and set(data['images']) == IMAGE_KEYS
+            and all(isinstance(ref, str) and PINNED.fullmatch(ref) for ref in data['images'].values())):
+        return None
+    return data
+
+
+def as_owner(path):
+    info = path.stat()
+
+    def drop():
+        os.setgroups([])
+        os.setgid(info.st_gid)
+        os.setuid(info.st_uid)
+    return drop if os.geteuid() == 0 else None
+
+
+def git(project, *args):
+    env = os.environ.copy()
+    if os.geteuid() == 0:
+        import pwd
+        account = pwd.getpwuid(project.stat().st_uid)
+        env.update(HOME=account.pw_dir, USER=account.pw_name, LOGNAME=account.pw_name)
+    return subprocess.run(['git', '-C', str(project), *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, preexec_fn=as_owner(project), env=env, timeout=300, check=False)
+
+
+def http_get(url, limit):
+    request = urllib.request.Request(url, headers={'Accept': 'application/vnd.github+json',
+                                                   'User-Agent': 'nanoclaw-ops'})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        body = response.read(limit + 1)
+    if len(body) > limit:
+        raise ValueError('response too large')
+    return body
+
+
+def fetch_candidates(repo, candidates, state_root, project_root, get=http_get, keep=3):
+    """Store the newest published manifests that descend from the installed release."""
+    installed = private_json(Path(state_root) / 'release.json')
+    if not isinstance(installed, dict) or not REVISION.fullmatch(str(installed.get('revision', ''))):
+        print('candidates=installed_release_unknown', flush=True)
+        return 1
+    releases = json.loads(get(RELEASES_API.format(repo=repo), 1024 * 1024))
+    project = Path(project_root).resolve()
+    if git(project, 'fetch', '-q', 'origin', 'main').returncode:
+        print('candidates=git_fetch_failed', flush=True)
+        return 1
+    stored = []
+    for release in releases if isinstance(releases, list) else []:
+        match = TAG.fullmatch(str(release.get('tag_name', ''))) if isinstance(release, dict) else None
+        if not match or release.get('draft') or release.get('prerelease'):
+            continue
+        asset = next((a for a in release.get('assets', []) if isinstance(a, dict)
+                      and a.get('name') == 'compose-release.json'), None)
+        url = asset.get('browser_download_url') if asset else None
+        if not isinstance(url, str) or not url.startswith('https://github.com/'):
+            continue
+        blob = get(url, MAX_MANIFEST)
+        manifest = valid_manifest(blob)
+        if not manifest or not manifest['revision'].startswith(match.group(1)):
+            continue
+        revision = manifest['revision']
+        if revision == installed['revision']:
+            break
+        if git(project, 'merge-base', '--is-ancestor', installed['revision'], revision).returncode:
+            continue  # not a descendant of what runs now
+        path = Path(candidates) / f'{revision}.json'
+        if not path.exists():
+            write_private(path, manifest)
+        stored.append(path)
+        if len(stored) >= keep:
+            break
+    for path in Path(candidates).glob('*.json'):
+        if path not in stored:
+            path.unlink()
+    print(f'candidates={len(stored)}', flush=True)
+    return 0
+
+
 def page(items, cursor):
     offset = int(cursor[1:]) if cursor else 0
     chunk = items[offset:offset + PAGE_SIZE]
@@ -444,8 +679,17 @@ def handle(sources, method, target, body=None):
         confirmed(body)
         public = key_match.group(1)
         return 200, (sources.forget_key(public) if key_match.group(2) else sources.reveal_key(public))
+    if path == '/api/v1/updates':
+        if method != 'POST':
+            raise OpsError(405, 'method_not_allowed')
+        if query:
+            raise OpsError(400, 'invalid_query')
+        if not isinstance(body, dict) or set(body) != {'release_revision', 'confirm'} or body['confirm'] is not True \
+                or not isinstance(body['release_revision'], str) or not REVISION.fullmatch(body['release_revision']):
+            raise OpsError(400, 'invalid_request')
+        return 202, UpdateRunner(sources).start(body['release_revision'])
     if name is None and not job_match:
-        if path.startswith('/api/v1/backups/') or path in ('/api/v1/updates', '/api/v1/imports/preflight'):
+        if path.startswith('/api/v1/backups/') or path == '/api/v1/imports/preflight':
             raise OpsError(501, 'not_implemented')
         raise OpsError(404, 'not_found')
     if name == 'backups' and method == 'POST':
@@ -542,7 +786,8 @@ def serve(args):
     here = Path(__file__).resolve().parent
     sources = Sources(args.state_root, args.backup_root, args.control_backup_root, args.candidates, key,
                       key_root=args.key_root, project_root=args.project_root, jobs_dir=args.jobs_dir,
-                      recovery_script=here / 'compose-recovery.py')
+                      recovery_script=here / 'compose-recovery.py', update_script=here / 'compose-release-update.py',
+                      update_mode=args.update_mode)
     if args.jobs_dir:
         os.makedirs(args.jobs_dir, mode=0o700, exist_ok=True)
     sock = Path(args.socket)
@@ -584,7 +829,17 @@ def main(argv=None):
     s.add_argument('--key-root', default=None, help='backup keys; enables backups from the panel')
     s.add_argument('--project-root', default=None, help='the Compose checkout; enables backups from the panel')
     s.add_argument('--jobs-dir', default=None, help='private directory for job records')
+    s.add_argument('--update-mode', choices=sorted(UPDATE_MODES), default=None,
+                   help='enables updates from the panel; production for real identities, synthetic for test hosts')
+    f = sub.add_parser('fetch-candidates')
+    f.add_argument('--repo', required=True)
+    f.add_argument('--candidates', required=True)
+    f.add_argument('--state-root', default='/srv/nanoclaw')
+    f.add_argument('--project-root', required=True)
     args = parser.parse_args(argv)
+    if args.command == 'fetch-candidates':
+        os.umask(0o077)
+        sys.exit(fetch_candidates(args.repo, args.candidates, args.state_root, args.project_root))
     serve(args)
 
 

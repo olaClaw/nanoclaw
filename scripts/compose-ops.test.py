@@ -105,7 +105,7 @@ class HandleTests(unittest.TestCase):
     def test_refuses_other_paths_methods_and_queries(self):
         sources = fixture(self.root)
         cases = [('GET', '/api/v1/agents', 'not_found'), ('POST', '/api/v1/releases', 'method_not_allowed'),
-                 ('POST', '/api/v1/updates', 'not_implemented'), ('POST', '/api/v1/backups/bkp_x/verify', 'not_implemented'),
+                 ('POST', '/api/v1/updates', 'invalid_request'), ('POST', '/api/v1/backups/bkp_x/verify', 'not_implemented'),
                  ('GET', '/api/v1/releases?cursor=o50', 'invalid_query'), ('GET', '/api/v1/backups?limit=5', 'invalid_query'),
                  ('GET', '/api/v1/backups?cursor=%27', 'invalid_query'), ('GET', 'relative', 'invalid_request')]
         for method, target, code in cases:
@@ -146,7 +146,7 @@ class SocketTests(unittest.TestCase):
 
                 status, headers, body = call('GET', '/api/v1/releases')
                 self.assertEqual((status, headers['Cache-Control']), (200, 'no-store'))
-                status, _, body = call('POST', '/api/v1/updates', b'{"confirm":true}')
+                status, _, body = call('POST', '/api/v1/updates', json.dumps({'release_revision': 'e' * 40, 'confirm': True}).encode())
                 self.assertEqual((status, body['error']['code']), (501, 'not_implemented'))
                 self.assertRegex(body['error']['request_id'], r'^req_[0-9a-f]{16}$')
             finally:
@@ -267,6 +267,164 @@ class BackupOperationTests(unittest.TestCase):
         with self.assertRaises(OPS.OpsError) as caught:
             OPS.handle(read_only, 'POST', '/api/v1/backups', {'confirm': True})
         self.assertEqual(caught.exception.code, 'not_implemented')
+
+
+class CandidateFetchTests(unittest.TestCase):
+    def setUp(self):
+        import subprocess
+        self.temp = tempfile.TemporaryDirectory()
+        root = self.root = Path(self.temp.name)
+        run = lambda *args, cwd=None: subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+        env = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid']
+        run('git', 'init', '-q', '--bare', '-b', 'main', str(root / 'origin.git'))
+        run('git', 'clone', '-q', str(root / 'origin.git'), str(root / 'work'))
+        commit = lambda message: (run('git', *env, 'commit', '-q', '--allow-empty', '-m', message, cwd=root / 'work'),
+                                  run('git', 'rev-parse', 'HEAD', cwd=root / 'work'))[1]
+        self.installed = commit('installed')
+        self.next = commit('next')
+        run('git', 'push', '-q', 'origin', 'main', cwd=root / 'work')
+        run('git', 'checkout', '-q', '--orphan', 'other', cwd=root / 'work')
+        self.unrelated = commit('unrelated')
+        run('git', 'clone', '-q', str(root / 'origin.git'), str(root / 'project'))
+        run('git', '-C', str(root / 'project'), 'reset', '-q', '--hard', self.installed)
+        run('git', 'push', '-q', 'origin', 'other', cwd=root / 'work')
+        run('git', '-C', str(root / 'project'), 'fetch', '-q', 'origin', 'other')
+        private(root / 'state/release.json', {'version': '2.4.0', 'revision': self.installed})
+        (root / 'candidates').mkdir(mode=0o700)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def manifest(self, revision, **changes):
+        images = {key: f'ghcr.io/fixture/{key}@sha256:' + 'a' * 64 for key in OPS.IMAGE_KEYS}
+        return {'schema': 'nanoclaw-compose-release/v1', 'version': '2.4.0', 'revision': revision,
+                'tree': 'b' * 40, 'images': images, **changes}
+
+    def fetch(self, releases, assets):
+        def get(url, _limit):
+            if url.startswith('https://api.github.com/'):
+                return json.dumps(releases).encode()
+            return json.dumps(assets[url]).encode() if isinstance(assets[url], dict) else assets[url]
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = OPS.fetch_candidates('olaClaw/nanoclaw', self.root / 'candidates', self.root / 'state',
+                                        self.root / 'project', get=get)
+        return code, out.getvalue(), sorted(p.name for p in (self.root / 'candidates').iterdir())
+
+    def release(self, revision, name='compose-release.json', tag=None):
+        url = f'https://github.com/olaClaw/nanoclaw/releases/download/{revision[:8]}/{name}'
+        return {'tag_name': tag or f'compose-{revision[:8]}', 'draft': False, 'prerelease': False,
+                'assets': [{'name': name, 'browser_download_url': url}]}, url
+
+    def test_stores_a_descendant_and_skips_unrelated_invalid_and_mislabelled(self):
+        good, good_url = self.release(self.next)
+        other, other_url = self.release(self.unrelated)
+        broken, broken_url = self.release('c' * 40)
+        wrong_tag, wrong_url = self.release(self.next, tag='compose-deadbeef')
+        installed, installed_url = self.release(self.installed)
+        code, output, files = self.fetch(
+            [other, broken, wrong_tag, good, installed],
+            {good_url: self.manifest(self.next), other_url: self.manifest(self.unrelated),
+             broken_url: b'{not json', wrong_url: self.manifest(self.next), installed_url: self.manifest(self.installed)})
+        self.assertEqual((code, output.strip(), files), (0, 'candidates=1', [f'{self.next}.json']))
+        sources = OPS.Sources(self.root / 'state', self.root / 'backups', self.root / 'control', self.root / 'candidates', KEY)
+        self.assertEqual(sources.candidate({'revision': self.installed})['revision'], self.next)
+
+    def test_refuses_unpinned_images_and_foreign_download_hosts(self):
+        release, url = self.release(self.next)
+        unpinned = self.manifest(self.next, images={key: 'ghcr.io/fixture/x:latest' for key in OPS.IMAGE_KEYS})
+        self.assertEqual(self.fetch([release], {url: unpinned})[2], [])
+        release['assets'][0]['browser_download_url'] = 'https://evil.example.invalid/compose-release.json'
+        self.assertEqual(self.fetch([release], {})[2], [])
+
+    def test_removes_candidates_that_are_no_longer_offered(self):
+        stale = self.root / 'candidates' / ('d' * 40 + '.json')
+        private(stale, self.manifest('d' * 40))
+        self.assertEqual(self.fetch([], {})[2], [])
+
+
+FAKE_UPDATE = """
+import os, sys
+if os.environ.get('FAKE_UPDATE_RESULT') == 'rolled_back':
+    print('release_update=failed'); print('failure_category=channels_not_ready'); print('rollback=healthy'); sys.exit(2)
+assert '--confirm-synthetic' in sys.argv and '--apply' in sys.argv
+print('release_update=healthy')
+"""
+
+
+class UpdateOperationTests(BackupOperationTests):
+    def setUp(self):
+        super().setUp()
+        root = self.root
+        (root / 'candidates').mkdir(mode=0o700, exist_ok=True)
+        self.revision = 'e' * 40
+        images = {key: f'ghcr.io/fixture/{key}@sha256:' + 'a' * 64 for key in OPS.IMAGE_KEYS}
+        private(root / 'candidates' / f'{self.revision}.json',
+                {'schema': 'nanoclaw-compose-release/v1', 'version': '2.4.1', 'revision': self.revision,
+                 'tree': 'f' * 40, 'images': images})
+        (root / 'compose-release-update.py').write_text(FAKE_UPDATE)
+        bin_dir = root / 'bin'
+        bin_dir.mkdir()
+        docker = bin_dir / 'docker'
+        docker.write_text('#!/bin/sh\n[ -n "$FAKE_PULL_FAIL" ] && exit 1\nexit 0\n')
+        docker.chmod(0o755)
+        self.path = os.environ['PATH']
+        os.environ['PATH'] = f'{bin_dir}:{self.path}'
+        s = self.sources
+        self.sources = OPS.Sources(s.state_root, s.backup_root, s.control_root, root / 'candidates', KEY,
+                                   key_root=s.key_root, project_root=s.project_root, jobs_dir=s.jobs_dir,
+                                   recovery_script=s.recovery_script, update_script=root / 'compose-release-update.py',
+                                   update_mode='synthetic')
+
+    def tearDown(self):
+        os.environ['PATH'] = self.path
+        for name in ('FAKE_UPDATE_RESULT', 'FAKE_PULL_FAIL'):
+            os.environ.pop(name, None)
+        super().tearDown()
+
+    def start(self):
+        status, body = OPS.handle(self.sources, 'POST', '/api/v1/updates',
+                                  {'release_revision': self.revision, 'confirm': True})
+        self.assertEqual((status, body['job']['kind']), (202, 'update'))
+        return self.wait(body['job']['id'])
+
+    def test_update_pulls_backs_up_and_applies_then_offers_the_key(self):
+        job = self.start()
+        self.assertEqual((job['kind'], job['outcome'], job['failure_category']), ('update', 'succeeded', None))
+        self.assertEqual([p['phase'] for p in job['phases']], ['pull', 'backup', 'update', 'done'])
+        self.assertEqual(job['release']['to_revision'], self.revision)
+        self.assertRegex(job['backup'], r'^bkp_[0-9a-f]{32}$')
+        key = OPS.handle(self.sources, 'POST', f'/api/v1/backups/{job["backup"]}/key', {'confirm': True})[1]
+        self.assertRegex(key['key'], r'^[0-9a-f]{64}$')
+
+    def test_rollback_and_failures_are_reported(self):
+        os.environ['FAKE_UPDATE_RESULT'] = 'rolled_back'
+        job = self.start()
+        self.assertEqual((job['outcome'], job['failure_category'], job['rollback']),
+                         ('rolled_back', 'channels_not_ready', 'healthy'))
+        os.environ.pop('FAKE_UPDATE_RESULT')
+        os.environ['FAKE_PULL_FAIL'] = '1'
+        job = self.start()
+        self.assertEqual((job['outcome'], job['failure_category'], job['backup']), ('failed', 'image_pull_failed', None))
+
+    def test_only_a_stored_candidate_can_be_installed(self):
+        for body, code in (({'release_revision': 'd' * 40, 'confirm': True}, 'candidate_unknown'),
+                           ({'release_revision': self.revision}, 'invalid_request'),
+                           ({'release_revision': 'short', 'confirm': True}, 'invalid_request')):
+            with self.subTest(body=body), self.assertRaises(OPS.OpsError) as caught:
+                OPS.handle(self.sources, 'POST', '/api/v1/updates', body)
+            self.assertEqual(caught.exception.code, code)
+
+    def test_update_is_refused_while_the_lock_is_held(self):
+        fd = os.open(self.sources.control_root / OPS.LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            OPS.fcntl.flock(fd, OPS.fcntl.LOCK_EX)
+            with self.assertRaises(OPS.OpsError) as caught:
+                OPS.handle(self.sources, 'POST', '/api/v1/updates', {'release_revision': self.revision, 'confirm': True})
+            self.assertEqual(caught.exception.code, 'operation_in_progress')
+        finally:
+            os.close(fd)
 
 
 if __name__ == '__main__':
