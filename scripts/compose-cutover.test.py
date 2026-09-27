@@ -52,6 +52,14 @@ class ComposeCutoverTests(unittest.TestCase):
             (stage / 'state/data/skill').symlink_to('/etc/passwd')
             with self.assertRaisesRegex(CUTOVER.RECOVERY.RecoveryError, 'stage_link_unsafe'):
                 CUTOVER.valid_staged_members(stage)
+            (stage / 'state/data/skill').unlink()
+            (stage / 'state/groups/main').mkdir(parents=True)
+            (stage / 'state/groups/main/python').symlink_to('/usr/bin/python3')
+            CUTOVER.valid_staged_members(stage)  # workspace links are interpreted inside the container
+            (stage / 'state/signal').mkdir(exist_ok=True)
+            (stage / 'state/signal/key').symlink_to('/tmp/elsewhere')
+            with self.assertRaisesRegex(CUTOVER.RECOVERY.RecoveryError, 'stage_link_unsafe'):
+                CUTOVER.valid_staged_members(stage)
 
     def test_staged_tree_accepts_internal_hardlinks_only_and_rejects_missing_files(self):
         with tempfile.TemporaryDirectory() as temp:

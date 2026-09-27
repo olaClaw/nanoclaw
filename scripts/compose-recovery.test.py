@@ -52,6 +52,17 @@ class ComposeRecoveryTests(unittest.TestCase):
                 with self.assertRaises(RECOVERY.RecoveryError):
                     RECOVERY.checked_members(archive)
 
+    def test_symlink_rules_allow_workspace_links_only(self):
+        allowed = RECOVERY.symlink_allowed
+        self.assertTrue(allowed('state/groups/main/.venv/bin/python', '/usr/bin/python3'))
+        self.assertTrue(allowed('state/groups/main/current', 'releases/2'))
+        self.assertTrue(allowed('state/data/container-skill', '/app/skills/example'))
+        for name, target in (('state/data/x', '/etc/passwd'), ('state/data/x', '/app/../etc'),
+                             ('state/link', '/usr/bin/python3'), ('state/signal/k', '/tmp/x'),
+                             ('env', '/etc/passwd'), ('state/groups/main/empty', '')):
+            with self.subTest(name=name, target=target):
+                self.assertFalse(allowed(name, target))
+
     def test_archive_rejects_hardlinks(self):
         with tempfile.TemporaryDirectory() as temp:
             archive = Path(temp) / 'unsafe-hardlink.tar'
@@ -133,6 +144,8 @@ class ComposeRecoveryTests(unittest.TestCase):
             (state / 'release.json').write_text(json.dumps({'revision': 'a' * 40}))
             (state / 'data/upgrade-state.json').write_text(json.dumps({'commit': 'a' * 40}))
             (state / 'data/container-skill').symlink_to('/app/skills/example')
+            (state / 'groups/main/.venv/bin').mkdir(parents=True)
+            (state / 'groups/main/.venv/bin/python').symlink_to('/usr/bin/python3')
             (state / 'data/pkg-a').write_text('shared package file')
             os.link(state / 'data/pkg-a', state / 'data/pkg-b')
             with sqlite3.connect(state / 'data/v2.db') as db:
@@ -192,6 +205,7 @@ class ComposeRecoveryTests(unittest.TestCase):
             self.assertEqual(os.readlink(root / 'staged/state/data/container-skill'),
                              '/app/skills/example')
             self.assertEqual((root / 'staged').stat().st_mode & 0o077, 0)
+            self.assertEqual(os.readlink(root / 'staged/state/groups/main/.venv/bin/python'), '/usr/bin/python3')
             staged_a, staged_b = root / 'staged/state/data/pkg-a', root / 'staged/state/data/pkg-b'
             self.assertEqual(staged_a.stat().st_ino, staged_b.stat().st_ino)
             self.assertEqual(staged_b.read_text(), 'shared package file')

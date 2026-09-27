@@ -74,9 +74,11 @@ python3 scripts/compose-recovery.py stage \
 ```
 
 The archive excludes transient sockets and other special files: services
-recreate their sockets on startup. It preserves only symbolic links below
-`state/data/` whose absolute target is under the container's `/app` tree,
-without following them on the host. Extraction writes regular files and
+recreate their sockets on startup. It preserves symbolic links below
+`state/data/` whose absolute target is under the container's `/app` tree, and
+links below `state/groups/` (group workspaces may hold links that are
+interpreted inside the agent container, such as a Python venv), without
+following them on the host. Extraction writes regular files and
 directories first, then recreates those validated links. A hard link is kept
 only when it points at a regular file already in the archive under the same
 top-level member; all other links and unsafe member paths are rejected. The

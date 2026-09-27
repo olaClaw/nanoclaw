@@ -189,6 +189,18 @@ def resume_profile_services(project, services):
             '--no-build', '--pull', 'never', *services)
 
 
+def symlink_allowed(name, linkname):
+    """Symbolic links a backup may carry. Links are recreated verbatim and never followed on the host.
+
+    Below state/data/ only container /app targets are expected. Below state/groups/ a group workspace
+    may hold links that are interpreted inside the agent container (for example a Python venv).
+    """
+    target = PurePosixPath(linkname)
+    if name.startswith('state/data/'):
+        return target.is_relative_to(PurePosixPath('/app')) and '..' not in target.parts
+    return name.startswith('state/groups/') and bool(linkname) and '\0' not in linkname
+
+
 def hardlink_target_ok(item, kinds):
     """A hard link may only point at a regular file already in the archive, under the same top-level member."""
     target, name = PurePosixPath(item.linkname), PurePosixPath(item.name)
@@ -211,10 +223,7 @@ def checked_members(archive):
             if any(parent in links for parent in (str(p) for p in path.parents)):
                 fail('archive_member_unsafe')
             if item.issym():
-                target = PurePosixPath(item.linkname)
-                if (not str(path).startswith('state/data/') or
-                        not target.is_relative_to(PurePosixPath('/app')) or
-                        '..' in target.parts):
+                if not symlink_allowed(str(path), item.linkname):
                     fail('archive_member_unsafe')
                 links.add(str(path))
                 kinds[str(path)] = 'link'
