@@ -96,6 +96,16 @@ while import/export is missing.
   server console/log; a web setup page creates the administrator only with
   that code, which expires on use or after a few minutes. The console command
   stays the recovery path.
+- **Guided HTTPS setup for new installs** (requested by the operator on
+  2026-09-27): a local console script that asks for the panel hostname, the
+  DNS provider and its token (hidden input, never echoed, logged or passed as
+  arguments) and configures the proxy through its API: initial administrator
+  with a random password shown once, DNS-01 certificate, proxy host to
+  `dashboard:8080` with Force SSL, HTTP/2 and HSTS. The proxy admin UI never
+  needs to be opened or tunnelled. Rehearsed by hand through the API on the
+  test LXC (self-signed certificate); needs the real DNS-01 path, idempotent
+  reruns and a dry-run mode. Goes with the installation guide and the
+  first-password setup code.
 - **Release updates recreate the dashboard** (done): `compose-release-update.py`
   recreates `dashboard` on the new host image when the profile is in use, and
   on the old one during a rollback. `proxy` image bumps still need a manual
