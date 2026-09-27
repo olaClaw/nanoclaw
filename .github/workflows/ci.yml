@@ -61,6 +61,7 @@ jobs:
           python3 scripts/compose-import-legacy.test.py
           python3 scripts/ci-docker-build.test.py
           python3 scripts/compose-rehearsal.test.py
+          python3 scripts/compose-ops.test.py
 
   test:
     runs-on: ubuntu-latest
