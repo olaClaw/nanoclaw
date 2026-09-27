@@ -87,3 +87,16 @@ while import/export is missing.
   URLs, browser storage or the download next to the bundle.
 - Scheduled automatic backups are out of the initial scope; confirm whether to
   keep them out after the manual backup lands.
+
+## Backlog added after the first deployment
+
+- **First-password setup code for new installs** (with the installation
+  guide; the operator agreed on 2026-09-27): on first start with no
+  administrator, the service generates a one-time code shown only in the
+  server console/log; a web setup page creates the administrator only with
+  that code, which expires on use or after a few minutes. The console command
+  stays the recovery path.
+- **Release updates recreate the dashboard services**: `compose-release-update.py`
+  recreates only the core services, so `dashboard` keeps the previous host
+  image until recreated. Recreate `dashboard` (and check `proxy`) when the
+  profile is enabled, including in the rollback.

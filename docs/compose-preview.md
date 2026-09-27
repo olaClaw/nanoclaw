@@ -185,7 +185,8 @@ production cutover and real channel migration still need their own review.
 
 The `dashboard` service is off unless Compose runs with `--profile dashboard`
 as well as `core-preview`. It uses the host image with another entry point
-(`dist/dashboard/web/main.js`) and UID 1001, and mounts only two things: its
+(`dist/dashboard/web/main.js`) and UID 61001 (outside the range given to
+people), and mounts only two things: its
 private state directory `/srv/nanoclaw/dashboard` (administrator credential,
 login throttle, audit log) and the `dashboard-admin` named volume that holds
 the host's admin socket. It has no Docker socket, `ncl.sock` or NanoClaw data.
@@ -196,7 +197,9 @@ is, as part of `/srv/nanoclaw`. Design and security model:
 
 To enable it on a Compose host:
 
-1. Create the state directory: `install -d -m 700 -o 1001 -g 1001 /srv/nanoclaw/dashboard`.
+1. Create the state directory: `install -d -m 700 -o 61001 -g 61001 /srv/nanoclaw/dashboard`
+   (an install that used the earlier UID 1001: `chown -R 61001:61001 /srv/nanoclaw/dashboard`,
+   then recreate the service).
 2. Set `NANOCLAW_DASHBOARD_ORIGIN` in the private `.env` to the exact https
    origin of the panel (the service refuses to start without it).
 3. Start it: `docker compose --env-file .env --profile core-preview --profile dashboard up -d --wait dashboard`.
