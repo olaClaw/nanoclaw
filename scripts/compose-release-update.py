@@ -184,7 +184,7 @@ def require_synthetic(values, channels):
 
 
 SCHEMA_PATHS = ('src/db/migrations', 'src/modules', 'src/mailbox/sqlite/schema.ts')
-LOG_TITLE = re.compile(r'\s(?:INFO|WARN|ERROR)\s+(.+?)(?:\s+[A-Za-z_][A-Za-z0-9_]*=|$)')
+LOG_TITLE = re.compile(r'(?:^|\s)(?:INFO|WARN|ERROR)\s+(.+?)(?:\s+[A-Za-z_][A-Za-z0-9_]*=|$)')
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 
 
@@ -240,25 +240,60 @@ def wait_for_channels(project, values, since, timeout=120):
     fail('channels_not_ready')
 
 
-def refresh_derived_images(project, state, target):
-    """Rebuild every per-group image on the new base now, instead of on the first message."""
+HOST_BUILD_TITLES = ('Rebuilding per-agent-group image on current base', 'Building per-agent-group image')
+
+
+def derived_image_current(labels, base, revision):
+    return (bool(labels) and labels.get('dev.nanoclaw.derived-from') == base and
+            labels.get('org.opencontainers.image.revision') == revision)
+
+
+def image_labels(tag):
+    try:
+        return json.loads(command(['docker', 'image', 'inspect', '-f', '{{json .Config.Labels}}', tag])) or {}
+    except UpdateError:
+        return {}
+
+
+def refresh_derived_images(project, state, target, since, *, wait=900, grace=90, poll=5):
+    """Make sure every per-group image is built on the new base before declaring the update healthy.
+
+    On start the host wakes sessions with pending messages and rebuilds a stale
+    derived image by itself. Starting a second build at the same time made the
+    first production retry fail, so wait for the image to become current, and
+    only trigger a rebuild when the host has not started one within `grace`.
+    """
     with sqlite3.connect(f'file:{state / "data/v2.db"}?mode=ro', uri=True) as db:
         rows = db.execute("SELECT agent_group_id FROM container_configs WHERE image_tag IS NOT NULL AND "
                           "((packages_apt IS NOT NULL AND packages_apt NOT IN ('', '[]')) OR "
                           "(packages_npm IS NOT NULL AND packages_npm NOT IN ('', '[]')))").fetchall()
     base = command(['docker', 'image', 'inspect', '-f', '{{.Id}}', target['images']['agent']])
+    container = compose(project, 'ps', '-q', 'nanoclaw')
+    triggered = 0
     for (group,) in rows:
         require(re.fullmatch(r'[A-Za-z0-9._-]{1,128}', group), 'agent_group_id_invalid')
-        compose(project, 'exec', '-T', 'nanoclaw', 'node', 'dist/cli/client.js', 'groups', 'restart',
-                '--id', group, '--rebuild', timeout=1200)
-        with sqlite3.connect(f'file:{state / "data/v2.db"}?mode=ro', uri=True) as db:
-            tag = db.execute('SELECT image_tag FROM container_configs WHERE agent_group_id = ?',
-                             (group,)).fetchone()[0]
-        labels = json.loads(command(['docker', 'image', 'inspect', '-f', '{{json .Config.Labels}}', tag])) or {}
-        require(labels.get('dev.nanoclaw.derived-from') == base and
-                labels.get('org.opencontainers.image.revision') == target['revision'],
-                'derived_image_not_refreshed')
-    print(f'derived_images_refreshed={len(rows)}', flush=True)
+        start = time.time()
+        asked = False
+        while True:
+            with sqlite3.connect(f'file:{state / "data/v2.db"}?mode=ro', uri=True) as db:
+                tag = db.execute('SELECT image_tag FROM container_configs WHERE agent_group_id = ?',
+                                 (group,)).fetchone()[0]
+            if derived_image_current(image_labels(tag), base, target['revision']):
+                break
+            if not asked and time.time() - start >= grace:
+                titles = log_titles(command(['docker', 'logs', '--since', since, container], timeout=60,
+                                            merge_stderr=True))
+                if not any(title in HOST_BUILD_TITLES for title in titles):
+                    try:
+                        compose(project, 'exec', '-T', 'nanoclaw', 'node', 'dist/cli/client.js', 'groups',
+                                'restart', '--id', group, '--rebuild', timeout=1200)
+                    except UpdateError:
+                        pass  # the image state below is what counts
+                    triggered += 1
+                asked = True
+            require(time.time() - start <= wait, 'derived_image_not_refreshed')
+            time.sleep(poll)
+    print(f'derived_images_refreshed={len(rows)} rebuilds_triggered={triggered}', flush=True)
 
 
 def stop_agents(install):
@@ -434,7 +469,7 @@ def apply_update(context, backup_root):
         release_state(project, controls, target, owner)
         if production:
             wait_for_channels(project, values, since)
-            refresh_derived_images(project, state, target)
+            refresh_derived_images(project, state, target, since)
             service_health(project)
         print('release_update=healthy', flush=True)
     except Exception as error:

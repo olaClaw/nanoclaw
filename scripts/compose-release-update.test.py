@@ -288,5 +288,72 @@ class ProductionModeTests(unittest.TestCase):
                     self.assertIn('release_update=healthy', output.getvalue())
 
 
+class DerivedImageRefreshTests(unittest.TestCase):
+    """The update waits for the host's own rebuild instead of starting a concurrent one."""
+
+    def run_refresh(self, label_sequence, host_log, *, wait=30, grace=0):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            (state / 'data').mkdir()
+            with sqlite3.connect(state / 'data/v2.db') as db:
+                db.execute('CREATE TABLE container_configs (agent_group_id TEXT, image_tag TEXT, '
+                           'packages_apt TEXT, packages_npm TEXT)')
+                db.execute("INSERT INTO container_configs VALUES ('ag-1', 'base:ag-1', '[\"ffmpeg\"]', '[]')")
+                db.execute("INSERT INTO container_configs VALUES ('ag-2', NULL, '[]', '[]')")
+            target = manifest('c' * 40, 'd' * 40, 'new')
+            labels = iter(label_sequence)
+            exec_calls = []
+
+            def fake_command(argv, **_):
+                if argv[:3] == ['docker', 'image', 'inspect'] and '{{.Id}}' in argv:
+                    return 'sha256:base'
+                if argv[:2] == ['docker', 'logs']:
+                    return host_log
+                return ''
+
+            def fake_compose(_project, *args, **_):
+                if args[:1] == ('exec',):
+                    exec_calls.append(args)
+                return 'host-container'
+
+            output = io.StringIO()
+            with (patch.object(UPDATE, 'command', side_effect=fake_command),
+                  patch.object(UPDATE, 'compose', side_effect=fake_compose),
+                  patch.object(UPDATE, 'image_labels', side_effect=lambda _tag: next(labels)),
+                  patch.object(UPDATE.time, 'sleep'),
+                  redirect_stdout(output)):
+                try:
+                    UPDATE.refresh_derived_images(Path(tmp), state, target, '2026-09-27T00:00:00Z',
+                                                  wait=wait, grace=grace, poll=0)
+                    error = None
+                except UPDATE.UpdateError as exc:
+                    error = exc
+            return exec_calls, output.getvalue(), error
+
+    current = {'dev.nanoclaw.derived-from': 'sha256:base', 'org.opencontainers.image.revision': 'c' * 40}
+    stale = {'dev.nanoclaw.derived-from': 'sha256:old', 'org.opencontainers.image.revision': 'a' * 40}
+
+    def test_host_rebuilding_by_itself_is_awaited_not_duplicated(self):
+        log = 'INFO Rebuilding per-agent-group image on current base agentGroupId="ag-1"\n'
+        calls, output, error = self.run_refresh([self.stale, self.stale, self.current], log)
+        self.assertIsNone(error)
+        self.assertEqual(calls, [])
+        self.assertIn('rebuilds_triggered=0', output)
+
+    def test_idle_host_gets_exactly_one_rebuild(self):
+        calls, output, error = self.run_refresh([self.stale, self.stale, self.stale, self.current],
+                                                'INFO NanoClaw running\n')
+        self.assertIsNone(error)
+        self.assertEqual(len(calls), 1)
+        self.assertIn('--rebuild', calls[0])
+        self.assertIn('rebuilds_triggered=1', output)
+
+    def test_image_that_never_becomes_current_fails(self):
+        calls, _, error = self.run_refresh([self.stale] * 5 + [{}] * 50, 'INFO NanoClaw running\n', wait=0)
+        self.assertIsNotNone(error)
+        self.assertIn('derived_image_not_refreshed', str(error))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
