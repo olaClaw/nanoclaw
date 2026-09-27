@@ -110,8 +110,8 @@ services:
 
   # Administrative dashboard (opt in with `--profile dashboard`). Same image
   # as the host, another entry point and UID, and none of the host's mounts:
-  # only its private state and the admin socket volume. Loopback-only port
-  # until the HTTPS proxy (D8) sits in front of it.
+  # only its private state and the admin socket volume. Browsers reach it
+  # through the `proxy` service; the loopback port is for diagnostics.
   dashboard:
     profiles: [dashboard]
     image: ${NANOCLAW_HOST_IMAGE:?Set NANOCLAW_HOST_IMAGE to a reviewed image}
@@ -157,6 +157,42 @@ services:
         ]
       interval: 15s
       timeout: 3s
+      retries: 3
+    networks: [dashboard]
+
+  # HTTPS in front of the dashboard (D8): Nginx Proxy Manager 2.16.0, pinned
+  # by digest; change it only through a reviewed PR. 443 is published on the
+  # LAN/VPN address alone (NANOCLAW_PROXY_BIND), the admin UI (81) on loopback
+  # for an SSH tunnel, and port 80 not at all: certificates use DNS-01.
+  # Configuration, certificates and the DNS token live in
+  # /srv/nanoclaw/proxy, inside the encrypted backup.
+  proxy:
+    profiles: [dashboard]
+    image: jc21/nginx-proxy-manager@sha256:4393e642e233e5efd5adeb7f10918d4aaea71c9ed875b94190273fc8e87f9594
+    depends_on:
+      dashboard:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      DISABLE_IPV6: 'true'
+    ports:
+      - ${NANOCLAW_PROXY_BIND:-127.0.0.1}:443:443
+      - 127.0.0.1:${NANOCLAW_PROXY_ADMIN_PORT:-18081}:81
+    volumes:
+      - type: bind
+        source: /srv/nanoclaw/proxy/data
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/nanoclaw/proxy/letsencrypt
+        target: /etc/letsencrypt
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: [CMD, /usr/bin/check-health]
+      interval: 30s
+      timeout: 5s
       retries: 3
     networks: [dashboard]
 
@@ -367,6 +403,6 @@ networks:
   agent-egress:
     name: nanoclaw-egress
     internal: true
-  # The dashboard alone; the proxy (D8) joins it later.
+  # The dashboard and the HTTPS proxy in front of it.
   dashboard:
     driver: bridge

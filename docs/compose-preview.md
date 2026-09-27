@@ -205,7 +205,29 @@ To enable it on a Compose host:
    The same command offers `revoke-sessions` and `unlock` (clears the login
    throttle).
 
-Until the HTTPS proxy (D8) exists, the panel listens only on the server's
-loopback address (`NANOCLAW_DASHBOARD_LOOPBACK_PORT`, default 18080); reach it
-through an SSH tunnel. The session cookie is `Secure`, so a browser needs
-HTTPS; the loopback port is for API checks, not for daily use.
+The dashboard itself listens only on the server's loopback address
+(`NANOCLAW_DASHBOARD_LOOPBACK_PORT`, default 18080), for API checks through an
+SSH tunnel. Browsers use HTTPS through the `proxy` service of the same profile.
+
+### HTTPS proxy
+
+`proxy` is Nginx Proxy Manager 2.16.0, pinned by digest in `compose.yaml`. It
+publishes 443 only on `NANOCLAW_PROXY_BIND`, the server's LAN/VPN address
+(default loopback, never `0.0.0.0`), and its admin UI only on loopback
+(`NANOCLAW_PROXY_ADMIN_PORT`, default 18081). Port 80 is not published:
+certificates are issued with the DNS-01 challenge. Its configuration,
+certificates and DNS-provider token live in `/srv/nanoclaw/proxy`, inside the
+encrypted backup (the backup accepts the certificate store's own relative
+links under `proxy/letsencrypt/`, nothing else).
+
+1. `install -d -m 700 /srv/nanoclaw/proxy /srv/nanoclaw/proxy/data /srv/nanoclaw/proxy/letsencrypt`.
+2. Set `NANOCLAW_PROXY_BIND` (and the panel's `NANOCLAW_DASHBOARD_ORIGIN`) in
+   the private `.env`, then start it with both profiles as above.
+3. Open the admin UI through an SSH tunnel (`ssh -L 18081:127.0.0.1:18081 …`),
+   create the administrator, and add a proxy host: the panel's hostname,
+   forward to `http://dashboard:8080`, a Let's Encrypt certificate with the
+   DNS challenge of your DNS provider (enter its API token only there, with the
+   least rights that allow DNS changes), "Force SSL" and HTTP/2 on.
+4. Make the hostname resolve to the LAN address for every client that should
+   reach the panel (local DNS; remote VPN clients need that DNS too). No
+   router forward may point at the published port.

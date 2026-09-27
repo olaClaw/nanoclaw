@@ -57,6 +57,13 @@ Companion documents in this directory:
   until the operations service exists. Same-origin CSP without inline code,
   values rendered as text only, CSRF token in memory only. Checked in
   headless Chromium against the real boundary and the synthetic install.
+- **D8 in Compose:** `proxy` service (Nginx Proxy Manager 2.16.0 pinned by
+  digest) in the `dashboard` profile: 443 on `NANOCLAW_PROXY_BIND` only,
+  admin UI on loopback, no port 80, DNS-01 (the image ships the Infomaniak
+  plugin). State in `/srv/nanoclaw/proxy`, covered by the encrypted backup,
+  whose symlink rule now accepts the certificate store's contained relative
+  links. Rehearsed on the test LXC with a self-signed certificate: HTTP/2,
+  login through TLS, hardened cookie, foreign origin refused.
 
 ## Next step
 
@@ -216,3 +223,4 @@ repository README.
 | 2026-09-27 | D1: host boundary over a Unix socket (HTTP framing, 64 KiB bodies, 15 s timeouts, `no-store`), read-only projections, per-install public-ID key in `data/dashboard/`, off unless `NANOCLAW_DASHBOARD_ADMIN_SOCKET` is set. 17 new tests (canaries, tampering, framing, key file). | D2: dashboard service and login. |
 | 2026-09-27 | D2: dashboard web service (auth, sessions, throttle, CSRF/Origin, reauth, audit, forwarding) and the local admin CLI; scrypt by operator decision. 19 new tests, including end to end over the real admin socket and the synthetic install. Fixed a keep-alive bug on refused uploads (413 now closes the connection) in both the service and the host socket. | Compose integration and test-LXC rehearsal. |
 | 2026-09-27 | D3: read-only UI served by the dashboard service; structural tests (CSP, no inline code, no `innerHTML`/storage, fetch only to `/api/v1`) and a headless Chromium walk-through (wrong password, login, every screen, agent detail, logout; no console errors, cookie not readable by script). | D8 (HTTPS), then the operations service. |
+| 2026-09-27 | D8 Compose part: NPM proxy service, backup rule for Let's Encrypt links, docs; rehearsal over TLS on the test LXC. Production enablement waits for the operator (DNS record, NPM admin, DNS token in NPM only). | Release, then enable on the production host with the operator. |

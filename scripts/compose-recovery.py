@@ -196,8 +196,15 @@ def symlink_allowed(name, linkname):
     Below state/data/ only container /app targets, or relative links staying inside state/data/, are
     accepted. Below state/groups/ a group workspace
     may hold links that are interpreted inside the agent container (for example a Python venv).
+    Below state/proxy/letsencrypt/ only the certificate store's own relative links (live/ -> archive/)
+    that stay inside it are accepted.
     """
     target = PurePosixPath(linkname)
+    if name.startswith('state/proxy/letsencrypt/'):
+        if not linkname or target.is_absolute():
+            return False
+        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), linkname))
+        return resolved.startswith('state/proxy/letsencrypt/')
     if name.startswith('state/data/'):
         if target.is_absolute():
             return target.is_relative_to(PurePosixPath('/app')) and '..' not in target.parts
