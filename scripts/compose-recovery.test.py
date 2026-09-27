@@ -57,6 +57,9 @@ class ComposeRecoveryTests(unittest.TestCase):
         self.assertTrue(allowed('state/groups/main/.venv/bin/python', '/usr/bin/python3'))
         self.assertTrue(allowed('state/groups/main/current', 'releases/2'))
         self.assertTrue(allowed('state/data/container-skill', '/app/skills/example'))
+        self.assertTrue(allowed('state/data/host-harness/x/node_modules/.bin/tool', '../pkg/bin/tool'))
+        self.assertFalse(allowed('state/data/host-harness/x/node_modules/.bin/tool', '../../../../../groups/g'))
+        self.assertFalse(allowed('state/data/a', '../../env'))
         for name, target in (('state/data/x', '/etc/passwd'), ('state/data/x', '/app/../etc'),
                              ('state/link', '/usr/bin/python3'), ('state/signal/k', '/tmp/x'),
                              ('env', '/etc/passwd'), ('state/groups/main/empty', '')):
