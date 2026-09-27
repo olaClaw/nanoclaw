@@ -4,6 +4,11 @@
 The operator must create and verify a full encrypted backup separately. This
 transaction changes only the checkout, three control files and affected Compose
 services. It never prints private values, command output or Docker logs.
+
+Every run records its job state (phase, outcome, failure category, rollback)
+in the control backup root, so the CLI and the dashboard read the same state:
+`--status` prints it; a run that died mid-update blocks every later run until
+the operator acknowledges it with `--acknowledge-interrupted <job_id>`.
 """
 
 import argparse
@@ -42,6 +47,16 @@ SUPPORT = ('onecli-egress', 'infomaniak-mail', 'nextcloud-calendar')
 SERVICES = ('nanoclaw', *SUPPORT, 'signal-cli', 'onecli', 'postgres')
 COMMIT = re.compile(r'[0-9a-f]{40}\Z')
 PINNED = re.compile(r'[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}\Z')
+
+
+JOB_SCHEMA = 'nanoclaw-compose-release-job/v1'
+JOB_FILE = 'compose-release-update.job.json'
+JOB_HISTORY = 'compose-release-update.jobs.jsonl'
+JOB_HISTORY_LIMIT = 50
+LOCK_FILE = '.compose-release-update.lock'
+CATEGORY = re.compile(r'[a-z][a-z0-9_]{0,63}\Z')
+JOB_ID = re.compile(r'[0-9a-f]{16}\Z')
+ROLLBACK_OUTCOMES = {'healthy': 'rolled_back', 'failed_manual_recovery_needed': 'rollback_failed'}
 
 
 class UpdateError(Exception):
@@ -156,6 +171,166 @@ def atomic_write(path, content, metadata):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def utc_now():
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def error_category(error):
+    code = str(error) if isinstance(error, (UpdateError, RECOVERY.RecoveryError)) else ''
+    return code if CATEGORY.fullmatch(code) else 'unexpected_error'
+
+
+def private_file():
+    return os.stat_result((stat.S_IFREG | 0o600, 0, 0, 1, os.geteuid(), os.getegid(), 0, 0, 0, 0))
+
+
+def read_job(root):
+    path = root / JOB_FILE
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == os.geteuid() and
+            not info.st_mode & 0o077 and info.st_size <= 64 * 1024, 'job_state_unsafe')
+    try:
+        record = json.loads(path.read_bytes())
+    except ValueError:
+        fail('job_state_invalid')
+    require(isinstance(record, dict) and record.get('schema') == JOB_SCHEMA and
+            JOB_ID.fullmatch(str(record.get('job_id', ''))), 'job_state_invalid')
+    return record
+
+
+class Job:
+    """Persistent, redacted state of one run: codes, revisions and UTC times only.
+
+    Writes are best effort: failing to record state must never interrupt an
+    update or its rollback.
+    """
+
+    def __init__(self, root, *, mode, apply):
+        now = utc_now()
+        self.root = root
+        self.warned = False
+        self.record = {
+            'schema': JOB_SCHEMA, 'job_id': secrets.token_hex(8), 'mode': mode, 'apply': apply,
+            'from_revision': None, 'to_revision': None, 'to_version': None,
+            'phase': 'preflight', 'outcome': 'running', 'failure_category': None, 'rollback': None,
+            'started_utc': now, 'updated_utc': now, 'finished_utc': None,
+            'phases': [{'phase': 'preflight', 'at': now}],
+        }
+
+    def save(self):
+        try:
+            atomic_write(self.root / JOB_FILE, (json.dumps(self.record, indent=2) + '\n').encode(),
+                         private_file())
+        except OSError:
+            if not self.warned:
+                print('job_state=write_failed', flush=True)
+                self.warned = True
+
+    def release(self, current, target):
+        self.record.update(from_revision=current['revision'], to_revision=target['revision'],
+                           to_version=target['version'])
+        self.save()
+
+    def phase(self, name):
+        now = utc_now()
+        self.record.update(phase=name, updated_utc=now)
+        self.record['phases'].append({'phase': name, 'at': now})
+        self.save()
+
+    def failed(self, category, rollback=None):
+        self.record.update(failure_category=category, rollback=rollback)
+
+    def finish(self, outcome, category=None):
+        now = utc_now()
+        if category and not self.record['failure_category']:
+            self.record['failure_category'] = category
+        self.record.update(outcome=outcome, updated_utc=now, finished_utc=now)
+        self.save()
+        append_history(self.root, self.record)
+        print(f'job_outcome={outcome}', flush=True)
+
+
+def append_history(root, record):
+    """Keep the last finished runs, without their phase timeline."""
+    try:
+        path = root / JOB_HISTORY
+        lines = path.read_text().splitlines() if path.exists() else []
+        lines.append(json.dumps({key: record[key] for key in record if key != 'phases'}))
+        atomic_write(path, ('\n'.join(lines[-JOB_HISTORY_LIMIT:]) + '\n').encode(), private_file())
+    except OSError:
+        pass
+
+
+class NoJob(Job):
+    def __init__(self):
+        super().__init__(None, mode='none', apply=False)
+
+    def save(self):
+        pass
+
+    def finish(self, outcome, category=None):
+        pass
+
+
+def lock_held(root):
+    """True when a run holds the update lock. Probing takes it for an instant only."""
+    try:
+        fd = os.open(root / LOCK_FILE, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def acquire_lock(fd, attempts=30):
+    # A status probe may hold the lock for a moment; only a real run keeps it.
+    for _ in range(attempts):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            time.sleep(0.1)
+    fail('update_already_running')
+
+
+def job_status(root):
+    record = read_job(root)
+    if record is None:
+        return None
+    if record.get('outcome') == 'running' and not lock_held(root):
+        record = {**record, 'outcome': 'interrupted'}
+    return record
+
+
+def unfinished_update(record):
+    """A dead run that got past preflight may have left the release half switched."""
+    return (record is not None and record.get('apply') is True and record.get('outcome') == 'running' and
+            record.get('phase') != 'preflight')
+
+
+def print_status(root, as_json):
+    record = job_status(root)
+    if as_json:
+        print(json.dumps(record, indent=2), flush=True)
+        return
+    if record is None:
+        print('job=none', flush=True)
+        return
+    for key in ('job_id', 'mode', 'apply', 'from_revision', 'to_revision', 'to_version', 'phase',
+                'outcome', 'failure_category', 'rollback', 'started_utc', 'updated_utc', 'finished_utc'):
+        value = record.get(key)
+        print(f'job_{key}={"" if value is None else str(value).lower() if isinstance(value, bool) else value}',
+              flush=True)
 
 
 def service_health(project):
@@ -320,7 +495,8 @@ def release_state(project, controls, expected, owner):
     return values
 
 
-def preflight(args):
+def preflight(args, job=None):
+    job = job or NoJob()
     production = bool(getattr(args, 'confirm_production', False))
     project = RECOVERY.source_path(args.project_root, kind='dir')
     state = RECOVERY.source_path(args.state_root, kind='dir')
@@ -350,6 +526,7 @@ def preflight(args):
             'target_manifest_unsafe')
     target_blob = target_file.read_bytes()
     target = validate_manifest(target_blob)
+    job.release(current, target)
     require(current['revision'] != target['revision'] and
             (production or current['version'] == target['version']) and
             all(current['images'][name] == target['images'][name]
@@ -433,7 +610,8 @@ def controls_unchanged(controls, contents):
             'control_files_changed_since_preflight')
 
 
-def apply_update(context, backup_root):
+def apply_update(context, backup_root, job=None):
+    job = job or NoJob()
     (project, controls, current_bytes, metadata, current, target_blob, target, owner, values,
      state, production) = context
     controls_unchanged(controls, current_bytes)
@@ -443,10 +621,12 @@ def apply_update(context, backup_root):
                   tree=target['tree'], updatedAt=datetime.now(timezone.utc).isoformat(),
                   via='compose-release-update')
     next_marker = (json.dumps(marker, indent=2) + '\n').encode('utf-8')
+    job.phase('control_backup')
     control_backup(backup_root, current_bytes, controls)
     stop_attempted = False
     try:
         stop_attempted = True
+        job.phase('stop_host')
         compose(project, 'stop', 'nanoclaw')
         print('old_host_stopped=yes', flush=True)
         if production:
@@ -454,12 +634,14 @@ def apply_update(context, backup_root):
         else:
             no_agents(values['NANOCLAW_INSTALL_ID'])
         controls_unchanged(controls, current_bytes)
+        job.phase('switch_release')
         git(project, 'switch', '--detach', target['revision'], owner=owner)
         require(git(project, 'rev-parse', 'HEAD', owner=owner) == target['revision'],
                 'checkout_switch_failed')
         for path, content in zip(controls, (next_env, target_blob, next_marker)):
             atomic_write(path, content, metadata[path])
         release_state(project, controls, target, owner)
+        job.phase('start_services')
         compose(project, 'up', '-d', '--wait', '--no-deps', '--no-build', '--pull',
                 'never', '--force-recreate', *SUPPORT)
         since = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -468,17 +650,22 @@ def apply_update(context, backup_root):
         service_health(project)
         release_state(project, controls, target, owner)
         if production:
+            job.phase('wait_channels')
             wait_for_channels(project, values, since)
+            job.phase('refresh_images')
             refresh_derived_images(project, state, target, since)
             service_health(project)
         print('release_update=healthy', flush=True)
     except Exception as error:
+        category = error_category(error)
         print('release_update=failed', flush=True)
-        print('failure_category=' + (str(error) if isinstance(error, UpdateError)
-                                     else 'unexpected_error'), flush=True)
+        print('failure_category=' + category, flush=True)
         if not stop_attempted:
             print('rollback=not_needed', flush=True)
+            job.failed(category, 'not_needed')
             raise UpdateError('update_failed') from error
+        job.failed(category)
+        job.phase('rollback')
         try:
             try:
                 compose(project, 'stop', 'nanoclaw')
@@ -500,36 +687,69 @@ def apply_update(context, backup_root):
                     'never', '--force-recreate', 'nanoclaw')
             service_health(project)
             print('rollback=healthy', flush=True)
+            job.failed(category, 'healthy')
         except Exception:
             print('rollback=failed_manual_recovery_needed', flush=True)
+            job.failed(category, 'failed_manual_recovery_needed')
         raise UpdateError('update_failed') from error
+
+
+def run(args, backup_root):
+    previous = read_job(backup_root)
+    if unfinished_update(previous):
+        # Even a dry run would overwrite the record, so every run waits for the operator.
+        require(args.acknowledge_interrupted == previous['job_id'], 'previous_update_interrupted')
+    if previous is not None and previous.get('outcome') == 'running':
+        # The caller holds the lock, so the run that wrote this record is gone.
+        append_history(backup_root, {**previous, 'outcome': 'interrupted'})
+    job = Job(backup_root, mode='production' if args.confirm_production else 'synthetic',
+              apply=args.apply)
+    job.save()
+    print(f'job_id={job.record["job_id"]}', flush=True)
+    try:
+        context = preflight(args, job)
+        if args.apply:
+            apply_update(context, backup_root, job)
+            job.finish('succeeded')
+        else:
+            print('release_update_mutation=disabled', flush=True)
+            job.finish('preflight_ok')
+    except Exception as error:
+        job.finish(ROLLBACK_OUTCOMES.get(job.record['rollback'], 'failed'), error_category(error))
+        raise
 
 
 def main():
     parser = RECOVERY.PrivateArgumentParser(description=__doc__)
     for flag in ('project-root', 'state-root', 'release-manifest', 'backup-dir',
-                 'key-file', 'control-backup-root'):
-        parser.add_argument('--' + flag, required=True)
+                 'key-file'):
+        parser.add_argument('--' + flag)
+    parser.add_argument('--control-backup-root', required=True)
+    parser.add_argument('--status', action='store_true',
+                        help='print the last job state and exit; changes nothing')
+    parser.add_argument('--json', action='store_true', help='with --status: print the record as JSON')
     parser.add_argument('--confirm-synthetic', action='store_true')
     parser.add_argument('--confirm-production', action='store_true',
                         help='install with real identities: same schema only, fresh backup required')
     parser.add_argument('--max-backup-age-minutes', type=int, default=120)
+    parser.add_argument('--acknowledge-interrupted', metavar='JOB_ID',
+                        help='allow runs again after the named run died mid-update')
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     os.umask(0o077)
     require(os.geteuid() == 0, 'root_required')
+    backup_root = RECOVERY.private_directory(Path(args.control_backup_root))
+    if args.status:
+        print_status(backup_root, args.json)
+        return
+    require(all(getattr(args, name) for name in ('project_root', 'state_root', 'release_manifest',
+                                                 'backup_dir', 'key_file')), 'invalid_arguments')
     require(args.confirm_synthetic != args.confirm_production, 'mode_confirmation_required')
     require(0 < args.max_backup_age_minutes <= 24 * 60, 'backup_age_limit_invalid')
-    backup_root = RECOVERY.private_directory(Path(args.control_backup_root))
-    lock_path = backup_root / '.compose-release-update.lock'
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    fd = os.open(backup_root / LOCK_FILE, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        context = preflight(args)
-        if args.apply:
-            apply_update(context, backup_root)
-        else:
-            print('release_update_mutation=disabled', flush=True)
+        acquire_lock(fd)
+        run(args, backup_root)
     finally:
         os.close(fd)
 
@@ -540,6 +760,5 @@ if __name__ == '__main__':
     except Exception as error:
         if not isinstance(error, UpdateError) or str(error) != 'update_failed':
             print('release_update=failed', flush=True)
-            print('failure_category=' + (str(error) if isinstance(error, (UpdateError, RECOVERY.RecoveryError))
-                                         else 'unexpected_error'), flush=True)
+            print('failure_category=' + error_category(error), flush=True)
         sys.exit(2)

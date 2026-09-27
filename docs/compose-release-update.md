@@ -77,11 +77,52 @@ PostgreSQL and Signal pins, control-file backup and automatic rollback), plus:
   host; their pending messages stay queued and are processed after the start.
 - **After the start** the command waits for the expected channel adapters in the
   host log (CLI, plus Signal and Telegram when configured, and `Signal channel
-connected`), then rebuilds every per-group image on the new base and checks
-  its `derived-from` and revision labels, so the first message does not wait
-  for a package build. Either check failing triggers the rollback.
+  connected`), then waits until every per-group image is built on the new base
+  (its `derived-from` and revision labels). The host usually starts that
+  rebuild by itself; the command triggers one only when the host has not
+  started it. Either check failing triggers the rollback.
 
 Create the backup with `compose-recovery.py backup --apply` just before the
 update, save its key in the password manager, and remove the key from the host
 once the update has been checked. Plan a short maintenance window: the host is
 stopped for the recreate and the per-group image rebuild.
+
+## Job state
+
+Every run, preflight-only or `--apply`, records its state in the control
+backup root, so the terminal and the future dashboard read the same job:
+
+- `compose-release-update.job.json` (root-owned, `0600`): the current or last
+  run, rewritten atomically at every phase.
+- `compose-release-update.jobs.jsonl`: the last 50 finished runs, without their
+  phase timeline.
+
+A record holds only fixed codes, commit IDs, the release version and UTC
+timestamps: `job_id`, `mode`, `apply`, `from_revision`, `to_revision`,
+`to_version`, `phase`, `outcome`, `failure_category`, `rollback`,
+`started_utc`, `updated_utc`, `finished_utc` and `phases` (each phase with its
+start time). No paths, identities, values or command output.
+
+| Field | Values |
+| --- | --- |
+| `phase` | `preflight`, `control_backup`, `stop_host`, `switch_release`, `start_services`, `wait_channels`, `refresh_images`, `rollback` |
+| `outcome` | `running`, `preflight_ok`, `succeeded`, `failed` (nothing changed), `rolled_back`, `rollback_failed`, `interrupted` |
+| `rollback` | empty, `not_needed`, `healthy`, `failed_manual_recovery_needed` |
+
+Read it without changing anything:
+
+```sh
+python3 /private/operator-tools/compose-release-update.py \
+  --control-backup-root /path/to/private-control-backups --status [--json]
+```
+
+The run prints `job_id=...` at the start and `job_outcome=...` at the end.
+`--status` reports `interrupted` for a `running` record when no run holds the
+update lock, i.e. the process died (killed, host reboot). A run that died after
+the preflight may have left the release half switched, so **every** later run
+stops with `previous_update_interrupted`. Check the checkout, control files and
+services by hand, restore from the backup if needed, then pass
+`--acknowledge-interrupted JOB_ID` with the ID from `--status` to run again. A
+second run started while one holds the lock stops with
+`update_already_running`. Failing to write the state prints
+`job_state=write_failed` once and does not stop the update or its rollback.
