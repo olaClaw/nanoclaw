@@ -252,6 +252,47 @@ def snapshot(ctx, live):
         raise
 
 
+def unit_enabled(user, unit):
+    code, _ = run(['systemctl', '--user', 'is-enabled', '--quiet', unit], user=user, check=False)
+    return code == 0
+
+
+def restart_policy(container):
+    _, policy = run(['docker', 'inspect', '-f', '{{.HostConfig.RestartPolicy.Name}}', container])
+    require(re.fullmatch(r'[a-z-]*', policy), 'restart_policy_unexpected')
+    return policy or 'no'
+
+
+def leave_stopped(ctx, live, folder):
+    """Final snapshot: keep the old install down, also across reboots, and write its rollback."""
+    user = ctx['user']
+    units = [ctx['host_unit']] + ([MAIL_UNIT] if ctx['mail_config'] is not None else [])
+    enabled = [unit for unit in units if unit_enabled(user, unit)]
+    policies = {cid: restart_policy(cid) for cid in (live['postgres'], live['onecli'])}
+    run(['docker', 'stop', live['postgres']])
+    for cid in policies:
+        run(['docker', 'update', '--restart=no', cid])
+    for unit in enabled:
+        run(['systemctl', '--user', 'disable', unit], user=user)
+    env = f'XDG_RUNTIME_DIR=/run/user/{user.pw_uid}'
+    lines = ['#!/bin/sh', '# Restore the old install after an unsuccessful cutover. Run as root on this machine,',
+             '# and only after the new install has been stopped.', 'set -eu']
+    lines += [f'docker update --restart={policy} {cid}' for cid, policy in policies.items()]
+    lines += [f'docker start {live["postgres"]}', f'docker start {live["onecli"]}']
+    lines += [f'runuser -u {user.pw_name} -- env {env} systemctl --user enable {unit}' for unit in enabled]
+    if ctx['mail_config'] is not None:
+        lines.append(f'runuser -u {user.pw_name} -- env {env} systemctl --user start {MAIL_UNIT}')
+    lines.append(f'runuser -u {user.pw_name} -- env {env} systemctl --user start {ctx["host_unit"]}')
+    # Beside the snapshot folder, not inside it: a later failure removes the partial
+    # folder, and the rollback must survive exactly that case.
+    script = folder.parent / f'{folder.name}.rollback-old-install.sh'
+    script.write_text('\n'.join(lines) + '\n')
+    os.chmod(script, 0o700)
+    print('original_install=stopped_and_disabled', flush=True)
+    print(f'units_disabled={len(enabled)} containers_restart_policy=no', flush=True)
+    print(f'rollback_script={script.name}', flush=True)
+
+
 def _snapshot(ctx, live, created):
     project, user = ctx['project'], ctx['user']
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
@@ -267,6 +308,7 @@ def _snapshot(ctx, live, created):
     archive, dump = folder / 'state.tar', folder / 'postgres.dump'
     stopped = {'host': False, 'mail': False, 'onecli': False}
     restart_ok = False
+    archived = False
     try:
         run(['systemctl', '--user', 'stop', ctx['host_unit']], user=user)
         stopped['host'] = True
@@ -292,21 +334,30 @@ def _snapshot(ctx, live, created):
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         require(listing.returncode == 0 and b'TABLE' in listing.stdout, 'postgres_dump_invalid')
         members = write_archive(archive, ctx, live)
+        archived = True
         print('state_archived=yes', flush=True)
     finally:
-        try:
-            if stopped['onecli']:
-                run(['docker', 'start', live['onecli']])
-            if stopped['mail']:
-                run(['systemctl', '--user', 'start', MAIL_UNIT], user=user)
-            if stopped['host']:
-                run(['systemctl', '--user', 'start', ctx['host_unit']], user=user)
-                require(wait_until(lambda: unit_active(user, ctx['host_unit'])), 'host_restart_timeout')
-            restart_ok = True
-            print('original_install=restarted', flush=True)
-        except Exception:
-            # Keep the original failure, if any; restart_ok stays False below.
-            print('original_install=restart_failed_manual_check_needed', flush=True)
+        if ctx.get('final') and archived:
+            # The cutover continues on the new host: the old install must stay down.
+            try:
+                leave_stopped(ctx, live, folder)
+                restart_ok = True
+            except Exception:
+                print('original_install=final_stop_incomplete_manual_check_needed', flush=True)
+        else:
+            try:
+                if stopped['onecli']:
+                    run(['docker', 'start', live['onecli']])
+                if stopped['mail']:
+                    run(['systemctl', '--user', 'start', MAIL_UNIT], user=user)
+                if stopped['host']:
+                    run(['systemctl', '--user', 'start', ctx['host_unit']], user=user)
+                    require(wait_until(lambda: unit_active(user, ctx['host_unit'])), 'host_restart_timeout')
+                restart_ok = True
+                print('original_install=restarted', flush=True)
+            except Exception:
+                # Keep the original failure, if any; restart_ok stays False below.
+                print('original_install=restart_failed_manual_check_needed', flush=True)
     if not restart_ok:
         fail('original_restart_failed')
     try:
@@ -320,7 +371,7 @@ def _snapshot(ctx, live, created):
         'counts': counts, 'migrations': live['migrations'], 'legacy_project_root': str(project),
         'legacy_uid': ctx['user'].pw_uid, 'legacy_gid': ctx['user'].pw_gid,
         'postgres': {'user': live['pg_user'], 'database': live['pg_db'], **dump_checks},
-        'state': state_checks,
+        'state': state_checks, 'final': bool(ctx.get('final')),
     }
     payload['hmac_sha256'] = RECOVERY.manifest_mac(payload, key)
     manifest = folder / 'manifest.json'
@@ -347,11 +398,18 @@ def main():
     parser.add_argument('--output-root', required=True)
     parser.add_argument('--key-root', required=True)
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--final', action='store_true',
+                        help='cutover: leave the old install stopped and disabled after a successful archive')
+    parser.add_argument('--confirm-final-stop', action='store_true')
     args = parser.parse_args()
     os.umask(0o077)
     require(os.geteuid() == 0, 'root_required')
+    require(not args.final or args.confirm_final_stop, 'final_stop_confirmation_required')
     ctx = inputs(args)
+    ctx['final'] = bool(args.final)
     live = preflight(ctx)
+    if args.final:
+        print('snapshot_mode=final', flush=True)
     if not args.apply:
         print('snapshot_mutation=disabled', flush=True)
         return

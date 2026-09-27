@@ -37,6 +37,19 @@ into a password manager, keep an offline copy, and remove it from the machine
 once the snapshot has been verified. Move the snapshot directory to the
 Compose host with its permissions intact.
 
+### Final snapshot for the cutover
+
+For the real move, add `--final --confirm-final-stop`. Once the archive is
+complete the old install is **not** restarted: its host and mail broker units
+are disabled, PostgreSQL is stopped too, and the OneCLI and PostgreSQL
+containers get `--restart=no`, so nothing comes back after a reboot while the
+new install uses the same Signal and Telegram identities. The command writes
+`SNAPSHOT_ID.rollback-old-install.sh` next to the snapshot folder (not inside
+it, so it survives a later failure): run it as root, only after stopping the
+new install, to restore the previous restart policies, enabled units and
+services. If the final snapshot fails before the archive is complete, the old
+install is restarted exactly as in a normal snapshot.
+
 ## 2. Import on the Compose host
 
 The Compose host needs a verified `compose-recovery.py backup` of its current
