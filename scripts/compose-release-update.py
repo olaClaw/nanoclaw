@@ -3,7 +3,9 @@
 
 The operator must create and verify a full encrypted backup separately. This
 transaction changes only the checkout, three control files and affected Compose
-services. It never prints private values, command output or Docker logs.
+services; when the release changes the database schema, its rollback also puts
+back NanoClaw's data from that backup (compose-recovery.py restore_state). It
+never prints private values, command output or Docker logs.
 
 Every run records its job state (phase, outcome, failure category, rollback)
 in the control backup root, so the CLI and the dashboard read the same state:
@@ -396,6 +398,11 @@ def schema_fingerprint(project, revision, owner):
     return sorted(entries)
 
 
+# A schema change is rolled back from the backup, so everything written after it is lost:
+# keep that window short.
+SCHEMA_CHANGE_MAX_BACKUP_AGE_MINUTES = 30
+
+
 def backup_age_minutes(manifest):
     created = datetime.strptime(manifest.get('created_utc', ''), '%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - created).total_seconds() / 60
@@ -580,30 +587,34 @@ def preflight(args, job=None):
                 labels.get('org.olaclaw.source.tree') == target['tree'] and
                 info.get('Os') == 'linux' and info.get('Architecture') == 'amd64',
                 'target_image_identity_mismatch')
-    if production:
-        # A production rollback restores code and control files only; a schema
-        # change would need the data restored from the backup as well.
-        require(schema_fingerprint(project, current['revision'], owner) ==
-                schema_fingerprint(project, target['revision'], owner),
-                'schema_change_requires_full_restore')
-    else:
+    # A schema change cannot be undone by switching code back: the new host
+    # migrates the data. Its rollback restores the data from the backup too.
+    schema_change = (schema_fingerprint(project, current['revision'], owner) !=
+                     schema_fingerprint(project, target['revision'], owner))
+    if schema_change:
+        RECOVERY.restore_preflight(state, backup_dir)
+    if not production:
         no_agents(values['NANOCLAW_INSTALL_ID'])
     service_health(project)
     backup_manifest = json.loads((backup_dir / 'manifest.json').read_bytes())
     require(backup_manifest.get('revision') == current['revision'],
             'backup_release_mismatch')
-    if production:
+    if production or schema_change:
         try:
             age = backup_age_minutes(backup_manifest)
         except ValueError:
             fail('backup_age_unknown')
         require(0 <= age <= args.max_backup_age_minutes, 'backup_too_old')
+        if schema_change:
+            require(age <= SCHEMA_CHANGE_MAX_BACKUP_AGE_MINUTES, 'backup_too_old_for_schema_change')
     RECOVERY.verify_or_stage(argparse.Namespace(
         action='verify', backup_dir=str(backup_dir), key_file=str(key_file)))
     print('release_update_preflight=ok', flush=True)
     print(f'release_update_mode={"production" if production else "synthetic"}', flush=True)
+    print(f'release_update_schema={"changed" if schema_change else "unchanged"}', flush=True)
+    restore = {'backup_dir': backup_dir, 'key_file': key_file} if schema_change else None
     return (project, controls, current_bytes, metadata, current, target_blob, target, owner, values,
-            state, production)
+            state, production, restore)
 
 
 def control_backup(root, current_bytes, controls):
@@ -632,7 +643,7 @@ def controls_unchanged(controls, contents):
 def apply_update(context, backup_root, job=None):
     job = job or NoJob()
     (project, controls, current_bytes, metadata, current, target_blob, target, owner, values,
-     state, production) = context
+     state, production, restore) = context
     controls_unchanged(controls, current_bytes)
     next_env = rewrite_env(current_bytes[controls[0]], target['images'])
     marker = json.loads(current_bytes[controls[2]])
@@ -644,6 +655,7 @@ def apply_update(context, backup_root, job=None):
     job.phase('control_backup')
     control_backup(backup_root, current_bytes, controls)
     stop_attempted = False
+    host_started = False
     try:
         stop_attempted = True
         job.phase('stop_host')
@@ -665,6 +677,8 @@ def apply_update(context, backup_root, job=None):
         compose(project, 'up', '-d', '--wait', '--no-deps', '--no-build', '--pull',
                 'never', '--force-recreate', *SUPPORT)
         since = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        # From here on the new host may have migrated the data.
+        host_started = True
         compose(project, 'up', '-d', '--wait', '--no-deps', '--no-build', '--pull',
                 'never', '--force-recreate', 'nanoclaw')
         service_health(project)
@@ -697,6 +711,14 @@ def apply_update(context, backup_root, job=None):
                     stop_agents(values['NANOCLAW_INSTALL_ID'])
             except Exception:
                 pass
+            if restore and host_started:
+                # The new host may have migrated the data: put back the backup's
+                # data, groups and store before the old code starts on them.
+                job.phase('restore_state')
+                compose(project, 'stop', 'nanoclaw', *SUPPORT)
+                stop_agents(values['NANOCLAW_INSTALL_ID'])
+                RECOVERY.restore_state(state, restore['backup_dir'], restore['key_file'])
+                print('state_restored=yes', flush=True)
             checkout_restored = True
             try:
                 git(project, 'switch', '--detach', current['revision'], owner=owner)

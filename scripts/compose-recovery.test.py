@@ -243,5 +243,119 @@ class ComposeRecoveryTests(unittest.TestCase):
                     RECOVERY.checked_members(root / 'unsafe.tar')
 
 
+class RestoreStateTests(unittest.TestCase):
+    """restore_state(): the data rollback for releases that change the schema."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = self.root = Path(self.temp.name)
+        source = root / 'backup-source'
+        (source / 'data').mkdir(parents=True)
+        (source / 'release.json').write_text(json.dumps({'revision': 'a' * 40}))
+        (source / 'data/upgrade-state.json').write_text(json.dumps({'commit': 'a' * 40}))
+        with sqlite3.connect(source / 'data/v2.db') as db:
+            db.execute('CREATE TABLE old_schema (id INTEGER)')
+        (source / 'groups/main').mkdir(parents=True)
+        (source / 'groups/main/notes.md').write_text('before the update')
+        (source / 'signal').mkdir()
+        (source / 'signal/ratchet').write_text('old signal state')
+        env, onecli = root / 'env-source', root / 'onecli-source'
+        env.write_text('EXAMPLE=value\n')
+        onecli.mkdir()
+        extras = {}
+        for name in RECOVERY.PRIVATE_INPUTS.values():
+            path = root / name.replace('/', '-')
+            path.mkdir() if name.endswith('mail-downloads') else path.write_text('private')
+            extras[name] = path
+        self.backup = root / 'backups/one'
+        self.backup.mkdir(parents=True, mode=0o700)
+        os.chmod(root / 'backups', 0o700)
+        keys = root / 'keys'
+        keys.mkdir(mode=0o700)
+        self.key = keys / 'one.key'
+        self.key.write_text('e' * 64 + '\n')
+        os.chmod(self.key, 0o600)
+        archive, dump = root / 'state.tar', root / 'postgres.dump'
+        dump.write_bytes(b'fixture-pg-dump')
+        RECOVERY.archive_sources(archive, source, env, onecli, extras)
+        payload = {'schema': RECOVERY.SCHEMA, 'revision': 'a' * 40,
+                   'state': RECOVERY.encrypt(archive, self.backup / 'state.tar.enc', self.key),
+                   'postgres': RECOVERY.encrypt(dump, self.backup / 'postgres.dump.enc', self.key)}
+        payload['hmac_sha256'] = RECOVERY.manifest_mac(payload, self.key)
+        (self.backup / 'manifest.json').write_text(json.dumps(payload))
+
+        # The live state after a failed release: migrated DB, new agent work, newer Signal state.
+        live = self.state = root / 'srv/nanoclaw'
+        (live / 'data').mkdir(parents=True)
+        with sqlite3.connect(live / 'data/v2.db') as db:
+            db.execute('CREATE TABLE new_schema (id INTEGER)')
+        (live / 'groups/main').mkdir(parents=True)
+        (live / 'groups/main/notes.md').write_text('written by the failed release')
+        (live / 'signal').mkdir()
+        (live / 'signal/ratchet').write_text('current signal state')
+        (live / 'proxy').mkdir()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def tables(self, path):
+        with sqlite3.connect(f'file:{path}?mode=ro', uri=True) as db:
+            return {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+
+    def test_puts_back_data_and_groups_and_keeps_the_rest_and_a_copy(self):
+        RECOVERY.restore_preflight(self.state, self.backup)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            RECOVERY.restore_state(self.state, self.backup, self.key)
+        self.assertIn('state_restore=done', output.getvalue())
+        self.assertEqual(self.tables(self.state / 'data/v2.db'), {'old_schema'})
+        self.assertEqual((self.state / 'groups/main/notes.md').read_text(), 'before the update')
+        # Signal's store and the proxy stay as they are.
+        self.assertEqual((self.state / 'signal/ratchet').read_text(), 'current signal state')
+        self.assertTrue((self.state / 'proxy').is_dir())
+        aside = [path for path in self.state.parent.iterdir() if path.name.startswith('nanoclaw.failed-')]
+        self.assertEqual(len(aside), 1)
+        self.assertEqual(self.tables(aside[0] / 'data/v2.db'), {'new_schema'})
+        self.assertEqual(sorted(path.name for path in aside[0].iterdir()), ['data', 'groups'])
+        self.assertEqual(aside[0].stat().st_mode & 0o077, 0)
+        leftovers = [path.name for path in self.state.parent.iterdir() if path.name.startswith('.nanoclaw-restore')]
+        self.assertEqual(leftovers, [])
+        self.assertEqual([path.name for path in self.backup.iterdir() if path.name.startswith('.recovery')], [])
+
+    def test_a_failed_swap_moves_everything_back(self):
+        real_rename = os.rename
+        calls = []
+
+        def flaky(source, destination):
+            calls.append(destination)
+            if len(calls) == 3:  # data swapped both ways, groups moved aside: then fail
+                raise OSError('fixture failure')
+            return real_rename(source, destination)
+
+        with patch.object(RECOVERY.os, 'rename', side_effect=flaky), redirect_stdout(io.StringIO()):
+            with self.assertRaises(OSError):
+                RECOVERY.restore_state(self.state, self.backup, self.key)
+        self.assertEqual(self.tables(self.state / 'data/v2.db'), {'new_schema'})
+        self.assertEqual((self.state / 'groups/main/notes.md').read_text(), 'written by the failed release')
+        self.assertEqual([path.name for path in self.state.parent.iterdir()], ['nanoclaw'])
+
+    def test_preflight_refuses_links_and_too_little_space(self):
+        with patch.object(RECOVERY, 'free_bytes', return_value=1024):
+            with self.assertRaisesRegex(RECOVERY.RecoveryError, 'restore_space_insufficient'):
+                RECOVERY.restore_preflight(self.state, self.backup)
+        (self.state / 'store').symlink_to(self.root)
+        with self.assertRaisesRegex(RECOVERY.RecoveryError, 'restore_state_mount_unsupported'):
+            RECOVERY.restore_preflight(self.state, self.backup)
+
+    def test_a_wrong_key_changes_nothing(self):
+        other = self.key.with_name('other.key')
+        other.write_text('d' * 64 + '\n')
+        os.chmod(other, 0o600)
+        with self.assertRaisesRegex(RECOVERY.RecoveryError, 'backup_authentication_failed'):
+            RECOVERY.restore_state(self.state, self.backup, other)
+        self.assertEqual(self.tables(self.state / 'data/v2.db'), {'new_schema'})
+        self.assertEqual(sorted(path.name for path in self.state.parent.iterdir()), ['nanoclaw'])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

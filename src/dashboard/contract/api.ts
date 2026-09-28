@@ -204,7 +204,8 @@ export const sessionList = page(
 
 export const releases = object({
   installed: object({ version, revision }),
-  candidate: nullable(object({ version, revision, verified: bool })),
+  /** `schema_change`: the release changes the database schema (its rollback restores data); null when unknown. */
+  candidate: nullable(object({ version, revision, verified: bool, schema_change: nullable(bool) })),
   last_update: nullable(job),
 });
 

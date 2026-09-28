@@ -122,7 +122,7 @@ class ComposeReleaseUpdateTests(unittest.TestCase):
                 owner = project.stat()
                 context = (project, controls, old_bytes, metadata, old,
                            json.dumps(new).encode(), new, owner,
-                           {'NANOCLAW_INSTALL_ID': 'synthetic'}, controls[1].parent, False)
+                           {'NANOCLAW_INSTALL_ID': 'synthetic'}, controls[1].parent, False, None)
                 head = [old['revision']]
                 calls = []
 
@@ -249,7 +249,7 @@ class ProductionModeTests(unittest.TestCase):
                 old_bytes = {path: path.read_bytes() for path in controls}
                 metadata = {path: path.stat() for path in controls}
                 context = (project, controls, old_bytes, metadata, old, json.dumps(new).encode(), new,
-                           project.stat(), {'NANOCLAW_INSTALL_ID': 'prod', 'SIGNAL_ACCOUNT': '+0'}, state, True)
+                           project.stat(), {'NANOCLAW_INSTALL_ID': 'prod', 'SIGNAL_ACCOUNT': '+0'}, state, True, None)
                 head = [old['revision']]
                 events = []
 
@@ -288,6 +288,128 @@ class ProductionModeTests(unittest.TestCase):
                 else:
                     self.assertEqual(head[0], new['revision'])
                     self.assertIn('release_update=healthy', output.getvalue())
+
+
+    def test_schema_change_rollback_restores_data_only_after_the_new_host_started(self):
+        # (where it fails, whether the data comes back from the backup)
+        for failure, restored in (('channels', True), ('switch', False), (None, False)):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                project, state = root / 'project', root / 'state'
+                (state / 'data').mkdir(parents=True)
+                project.mkdir()
+                old = manifest('a' * 40, 'b' * 40, 'old')
+                new = manifest('c' * 40, 'd' * 40, 'new')
+                for name in ('onecli', 'postgres', 'signal'):
+                    new['images'][name] = old['images'][name]
+                controls = (project / '.env', state / 'release.json', state / 'data/upgrade-state.json')
+                env = ''.join(f'{key}={old["images"][name]}\n' for name, key in UPDATE.IMAGE_KEYS.items())
+                controls[0].write_text(env + 'NANOCLAW_INSTALL_ID=prod\n')
+                controls[1].write_text(json.dumps(old))
+                controls[2].write_text(json.dumps({'version': '2.4.0', 'commit': old['revision'],
+                                                   'tree': old['tree']}))
+                for path in controls:
+                    os.chmod(path, 0o600)
+                old_bytes = {path: path.read_bytes() for path in controls}
+                restore = {'backup_dir': root / 'backup', 'key_file': root / 'key'}
+                context = (project, controls, old_bytes, {path: path.stat() for path in controls}, old,
+                           json.dumps(new).encode(), new, project.stat(), {'NANOCLAW_INSTALL_ID': 'prod'},
+                           state, True, restore)
+                head = [old['revision']]
+                events = []
+
+                def fake_git(_project, *args, owner=None):
+                    if args[:2] == ('switch', '--detach'):
+                        if failure == 'switch' and args[-1] == new['revision']:
+                            raise UPDATE.UpdateError('command_failed')
+                        head[0] = args[-1]
+                        events.append(('switch', args[-1][:1]))
+                    if args == ('rev-parse', 'HEAD^{tree}'):
+                        return old['tree'] if head[0] == old['revision'] else new['tree']
+                    if args == ('status', '--porcelain'):
+                        return ''
+                    return head[0]
+
+                def channels(*_):
+                    if failure == 'channels':
+                        raise UPDATE.UpdateError('channels_not_ready')
+
+                def restore_state(state_root, backup_dir, key_file):
+                    events.append(('restore', state_root == state, backup_dir, key_file))
+
+                class Job(UPDATE.NoJob):
+                    def phase(self, name):
+                        events.append(('phase', name))
+
+                output = io.StringIO()
+                with (patch.object(UPDATE, 'git', side_effect=fake_git),
+                      patch.object(UPDATE, 'compose', return_value=''),
+                      patch.object(UPDATE, 'stop_agents'),
+                      patch.object(UPDATE, 'wait_for_channels', side_effect=channels),
+                      patch.object(UPDATE, 'refresh_derived_images'),
+                      patch.object(UPDATE, 'service_health'),
+                      patch.object(UPDATE.RECOVERY, 'restore_state', side_effect=restore_state),
+                      redirect_stdout(output)):
+                    if failure:
+                        with self.assertRaisesRegex(UPDATE.UpdateError, 'update_failed'):
+                            UPDATE.apply_update(context, root, Job())
+                    else:
+                        UPDATE.apply_update(context, root, Job())
+                restores = [event for event in events if event[0] == 'restore']
+                if restored:
+                    self.assertEqual(restores, [('restore', True, restore['backup_dir'], restore['key_file'])])
+                    # Data first, then the old code on it.
+                    self.assertLess(events.index(('phase', 'restore_state')), events.index(('switch', 'a')))
+                    self.assertIn('state_restored=yes', output.getvalue())
+                    self.assertIn('rollback=healthy', output.getvalue())
+                else:
+                    self.assertEqual(restores, [])
+                if failure:
+                    self.assertEqual(head[0], old['revision'])
+                    self.assertTrue(all(path.read_bytes() == old_bytes[path] for path in controls))
+
+    def test_a_failed_data_restore_asks_for_manual_recovery(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project, state = root / 'project', root / 'state'
+            (state / 'data').mkdir(parents=True)
+            project.mkdir()
+            old = manifest('a' * 40, 'b' * 40, 'old')
+            new = manifest('c' * 40, 'd' * 40, 'new')
+            for name in ('onecli', 'postgres', 'signal'):
+                new['images'][name] = old['images'][name]
+            controls = (project / '.env', state / 'release.json', state / 'data/upgrade-state.json')
+            controls[0].write_text(''.join(f'{key}={old["images"][name]}\n' for name, key in UPDATE.IMAGE_KEYS.items()))
+            controls[1].write_text(json.dumps(old))
+            controls[2].write_text(json.dumps({'version': '2.4.0', 'commit': old['revision'], 'tree': old['tree']}))
+            for path in controls:
+                os.chmod(path, 0o600)
+            context = (project, controls, {p: p.read_bytes() for p in controls}, {p: p.stat() for p in controls},
+                       old, json.dumps(new).encode(), new, project.stat(), {'NANOCLAW_INSTALL_ID': 'prod'},
+                       state, True, {'backup_dir': root / 'b', 'key_file': root / 'k'})
+            head = [old['revision']]
+
+            def fake_git(_project, *args, owner=None):
+                if args[:2] == ('switch', '--detach'):
+                    head[0] = args[-1]
+                if args == ('rev-parse', 'HEAD^{tree}'):
+                    return old['tree'] if head[0] == old['revision'] else new['tree']
+                return '' if args == ('status', '--porcelain') else head[0]
+
+            output = io.StringIO()
+            with (patch.object(UPDATE, 'git', side_effect=fake_git),
+                  patch.object(UPDATE, 'compose', return_value=''),
+                  patch.object(UPDATE, 'stop_agents'),
+                  patch.object(UPDATE, 'wait_for_channels', side_effect=UPDATE.UpdateError('channels_not_ready')),
+                  patch.object(UPDATE, 'service_health'),
+                  patch.object(UPDATE.RECOVERY, 'restore_state',
+                               side_effect=UPDATE.RECOVERY.RecoveryError('restore_space_insufficient')),
+                  redirect_stdout(output)):
+                with self.assertRaisesRegex(UPDATE.UpdateError, 'update_failed'):
+                    UPDATE.apply_update(context, root)
+            self.assertIn('rollback=failed_manual_recovery_needed', output.getvalue())
+            # The old code never started on migrated data.
+            self.assertEqual(head[0], new['revision'])
 
 
 class DerivedImageRefreshTests(unittest.TestCase):
@@ -550,7 +672,7 @@ class DashboardRefreshTests(unittest.TestCase):
         old_bytes = {path: path.read_bytes() for path in controls}
         metadata = {path: path.stat() for path in controls}
         return (project, controls, old_bytes, metadata, old, json.dumps(new).encode(), new, project.stat(),
-                {'NANOCLAW_INSTALL_ID': 'synthetic'}, state, False), old, new
+                {'NANOCLAW_INSTALL_ID': 'synthetic'}, state, False, None), old, new
 
     def run_update(self, enabled, fail_host=False):
         with tempfile.TemporaryDirectory() as temp:

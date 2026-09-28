@@ -187,6 +187,9 @@ export const APP_JS = String.raw`'use strict';
     backup_unsafe: 'Questo backup non può essere eliminato dal pannello.',
     candidate_unknown: 'Questa release non è più tra le candidate: aggiorna la pagina.',
     operation_in_progress: 'È già in corso un\'operazione di manutenzione (backup, aggiornamento o cambio modello).',
+    backup_too_old_for_schema_change: 'Il backup è troppo vecchio per una release che cambia il database.',
+    restore_space_insufficient: 'Spazio disco insufficiente per un eventuale ripristino dei dati.',
+    restore_state_mount_unsupported: 'Lo stato è su un disco separato: il ripristino automatico dei dati non è possibile.',
     preflight_expired: 'Verifica scaduta: ripetila.',
     preflight_stale: 'Gli agenti sono cambiati dopo la verifica: ripetila.',
     preflight_not_ready: 'La verifica non è riuscita: correggi e ripeti.',
@@ -202,6 +205,7 @@ export const APP_JS = String.raw`'use strict';
     connected: ['Connesso', ''], disconnected: ['Disconnesso', 'bad'], reachable: ['Raggiungibile', ''], unreachable: ['Non raggiungibile', 'bad'],
     running: ['In esecuzione', ''], idle: ['Inattivo', 'warn'], active: ['Attiva', ''], closed: ['Chiusa', 'warn'],
     verified: ['Verificato', ''], unverified: ['Non verificato', 'warn'], failed: ['Verifica fallita', 'bad'],
+    schema_change: ['Cambia il database', 'warn'],
     local: ['LLM locale', ''], external: ['Provider esterno', 'warn'], mixed: ['Configurazione mista', 'warn'], unconfigured: ['Non configurato', 'warn'],
   };
 
@@ -487,6 +491,7 @@ export const APP_JS = String.raw`'use strict';
     preflight: 'verifica preliminare', control_backup: 'copia dei file di controllo', stop_host: 'arresto dell\'host',
     switch_release: 'cambio di release', start_services: 'avvio dei servizi', wait_channels: 'attesa dei canali',
     refresh_images: 'aggiornamento immagini', refresh_dashboard: 'aggiornamento dashboard', rollback: 'ripristino',
+    restore_state: 'ripristino dei dati dal backup',
     snapshot: 'copia della configurazione attuale', write_settings: 'salvataggio delle impostazioni',
     update_agents: 'aggiornamento degli agenti', restart_agents: 'riavvio degli agenti', verify: 'verifica', done: 'fine',
   };
@@ -509,6 +514,7 @@ export const APP_JS = String.raw`'use strict';
       card('Installata', el('div', { class: 'metric' }, r.installed.version), el('p', { class: 'muted' }, 'Revisione ' + r.installed.revision.slice(0, 8))),
       card('Candidata', r.candidate
         ? [el('div', { class: 'metric' }, r.candidate.version), el('p', { class: 'muted' }, 'Revisione ' + r.candidate.revision.slice(0, 8)),
+          r.candidate.schema_change ? el('p', {}, status('schema_change')) : null,
           el('div', { class: 'actions' }, el('button', { class: 'primary', type: 'button', onclick: () => confirmUpdate(view, r.candidate) }, 'Installa'))]
         : el('p', { class: 'muted' }, 'Nessuna release candidata.')),
     ];
@@ -622,6 +628,9 @@ export const APP_JS = String.raw`'use strict';
       el('h2', {}, 'Installare la release ' + candidate.version + ' (' + candidate.revision.slice(0, 8) + ')?'),
       el('p', {}, 'Prima dell\'aggiornamento viene fatto un backup cifrato. Per qualche minuto i canali si fermano; se qualcosa non va, la release attuale viene ripristinata da sola.'),
       el('p', {}, 'Anche questo pannello si riavvia: dovrai accedere di nuovo. L\'esito resta in Aggiornamenti e la chiave del backup in Backup.'),
+      candidate.schema_change
+        ? el('p', { class: 'message error' }, 'Questa release cambia la struttura del database. Se l\'aggiornamento non riesce, dati e cartelle degli agenti vengono ripristinati dal backup appena fatto: ciò che è arrivato durante la manutenzione (di solito pochi minuti) andrebbe perso. Lo stato non riuscito resta sul server per la diagnosi.')
+        : null,
       el('div', { class: 'actions' },
         el('button', { class: 'primary', type: 'button', onclick: () => { box.remove(); startUpdate(view, candidate); } }, 'Installa'),
         el('button', { class: 'secondary', type: 'button', onclick: () => box.remove() }, 'Annulla')));
