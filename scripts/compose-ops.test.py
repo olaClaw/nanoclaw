@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import socket
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -60,7 +61,8 @@ class HandleTests(unittest.TestCase):
         status, body = OPS.handle(fixture(self.root), 'GET', '/api/v1/releases')
         self.assertEqual(status, 200)
         self.assertEqual(body['installed'], {'version': '2.4.0', 'revision': NEW})
-        self.assertEqual(body['candidate'], {'version': '2.4.1', 'revision': 'e' * 40, 'verified': True})
+        self.assertEqual(body['candidate'], {'version': '2.4.1', 'revision': 'e' * 40, 'verified': True,
+                                             'schema_change': None})
         job = body['last_update']
         self.assertEqual((job['id'], job['kind'], job['outcome'], job['phase']),
                          ('job_0123456789abcdef', 'update', 'succeeded', 'refresh_dashboard'))
@@ -124,6 +126,33 @@ class HandleTests(unittest.TestCase):
         body = OPS.handle(sources, 'GET', '/api/v1/releases')[1]
         # The broken current record is skipped; the newest history line wins.
         self.assertEqual(body['last_update']['id'], 'job_0123456789abcdef')
+
+
+class SchemaChangeTests(unittest.TestCase):
+    def test_only_schema_files_count_as_a_schema_change(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            env = {**os.environ, 'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
+                   'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@example.invalid'}
+
+            def run(*args):
+                return subprocess.run(['git', '-C', str(root), *args], env=env, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            run('init', '-q')
+            (root / 'src/db/migrations').mkdir(parents=True)
+            (root / 'src/modules/x/migrations').mkdir(parents=True)
+            (root / 'src/db/migrations/001-a.ts').write_text('a')
+            (root / 'src/modules/x/other.ts').write_text('a')
+            run('add', '-A'); run('commit', '-qm', 'one'); first = run('rev-parse', 'HEAD')
+            (root / 'src/modules/x/other.ts').write_text('b')
+            (root / 'src/db/migrations/001-a.test.ts').write_text('t')
+            run('add', '-A'); run('commit', '-qm', 'two'); second = run('rev-parse', 'HEAD')
+            (root / 'src/modules/x/migrations/002-b.ts').write_text('m')
+            run('add', '-A'); run('commit', '-qm', 'three'); third = run('rev-parse', 'HEAD')
+            self.assertIs(OPS.schema_change(root, first, second), False)
+            self.assertIs(OPS.schema_change(root, second, third), True)
+            self.assertIsNone(OPS.schema_change(root, first, 'f' * 40))
 
 
 class SocketTests(unittest.TestCase):

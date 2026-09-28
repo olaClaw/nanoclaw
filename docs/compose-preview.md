@@ -245,7 +245,10 @@ installed one, and fetches that revision into the checkout as its owner. The
 panel offers the newest as the candidate; installing it pulls the three fork
 images, takes a fresh encrypted backup under the release-update lock and runs
 `compose-release-update.py` in production mode, whose checks and automatic
-rollback apply unchanged. The dashboard restarts during the update; the
+rollback apply unchanged. A candidate that changes the database schema is
+flagged, and its confirmation warns that a failed update restores NanoClaw's
+data from the backup just taken, losing what arrived during the maintenance
+window ([compose-release-update.md](compose-release-update.md)). The dashboard restarts during the update; the
 result stays on the Updates screen and the backup's key on the Backups
 screen. The service answers on a Unix socket in
 `/var/lib/nanoclaw-ops/sock/` that only the dashboard's group (61001) can

@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Private, operator-run backup and offline restore staging for Compose installs.
+"""Private, operator-run backup and restore for Compose installs.
 
-This tool never cuts over a live install. It emits fixed status labels only.
-Keep the encryption key on separate storage from the backup archive.
+`backup`, `verify` and `stage` never touch a live install. `restore_state()`
+is the one exception: the release-update tool calls it, with every writer
+stopped, to roll back a release that changed the database schema. It emits
+fixed status labels only. Keep the encryption key on separate storage from
+the backup archive.
 """
 
 import argparse
@@ -286,10 +289,14 @@ def preserve_numeric_metadata(item, destination):
     return filtered.replace(uname='', gname='', deep=False)
 
 
-def extract_checked(archive, target):
+def extract_checked(archive, target, prefixes=None):
+    """Extract a checked archive; with `prefixes`, only those members (and what lies below them)."""
     checked_members(archive)
     with tarfile.open(archive, 'r:') as stream:
         members = stream.getmembers()
+        if prefixes is not None:
+            members = [item for item in members
+                       if any(item.name == p or item.name.startswith(p + '/') for p in prefixes)]
         symlinks = [item for item in members if item.issym()]
         stream.extractall(target, members=(item for item in members if not item.issym()),
                           filter=preserve_numeric_metadata)
@@ -424,9 +431,8 @@ def backup(args):
                 raise
 
 
-def verify_or_stage(args):
-    folder = private_directory(Path(args.backup_dir))
-    key = source_path(args.key_file, kind='file')
+def authenticated_manifest(folder, key):
+    """The backup's manifest, after checking the key file and the manifest's MAC."""
     not_nested(folder, key.parent)
     if key.stat().st_mode & 0o077:
         fail('key_permissions_unsafe')
@@ -438,6 +444,47 @@ def verify_or_stage(args):
     mac = manifest.pop('hmac_sha256', None)
     if not isinstance(mac, str) or not hmac.compare_digest(mac, manifest_mac(manifest, key)):
         fail('backup_authentication_failed')
+    return manifest
+
+
+def decrypt_checked(folder, key, manifest, work):
+    """Decrypt both parts into `work` and check the archive, release, marker and database. Returns their paths."""
+    archive = work / 'state.tar'
+    dump = work / 'postgres.dump'
+    decrypt(folder / 'state.tar.enc', archive, key, manifest['state'])
+    decrypt(folder / 'postgres.dump.enc', dump, key, manifest['postgres'])
+    checked_members(archive)
+    with tarfile.open(archive, 'r:') as stream:
+        release = stream.extractfile('state/release.json')
+        if release is None or json.load(release).get('revision') != manifest['revision']:
+            fail('backup_revision_mismatch')
+        marker = stream.extractfile('state/data/upgrade-state.json')
+        if marker is None or json.load(marker).get('commit') != manifest['revision']:
+            fail('backup_marker_mismatch')
+        database = stream.extractfile('state/data/v2.db')
+        if database is None:
+            fail('backup_sqlite_missing')
+        sqlite_copy = work / 'v2.db'
+        with sqlite_copy.open('wb') as output:
+            shutil.copyfileobj(database, output)
+        for suffix in ('-wal', '-shm'):
+            try:
+                sidecar = stream.extractfile('state/data/v2.db' + suffix)
+            except KeyError:
+                sidecar = None
+            if sidecar is not None:
+                with (work / ('v2.db' + suffix)).open('wb') as output:
+                    shutil.copyfileobj(sidecar, output)
+    with sqlite3.connect(f'file:{sqlite_copy}?mode=ro', uri=True) as db:
+        if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+            fail('backup_sqlite_invalid')
+    return archive, dump
+
+
+def verify_or_stage(args):
+    folder = private_directory(Path(args.backup_dir))
+    key = source_path(args.key_file, kind='file')
+    manifest = authenticated_manifest(folder, key)
     target = None
     if args.action == 'stage':
         if not args.confirm_sensitive_plaintext:
@@ -452,35 +499,7 @@ def verify_or_stage(args):
     with tempfile.TemporaryDirectory(prefix='.recovery-verify-', dir=folder) as temp:
         work = Path(temp)
         os.chmod(work, 0o700)
-        archive = work / 'state.tar'
-        dump = work / 'postgres.dump'
-        decrypt(folder / 'state.tar.enc', archive, key, manifest['state'])
-        decrypt(folder / 'postgres.dump.enc', dump, key, manifest['postgres'])
-        checked_members(archive)
-        with tarfile.open(archive, 'r:') as stream:
-            release = stream.extractfile('state/release.json')
-            if release is None or json.load(release).get('revision') != manifest['revision']:
-                fail('backup_revision_mismatch')
-            marker = stream.extractfile('state/data/upgrade-state.json')
-            if marker is None or json.load(marker).get('commit') != manifest['revision']:
-                fail('backup_marker_mismatch')
-            database = stream.extractfile('state/data/v2.db')
-            if database is None:
-                fail('backup_sqlite_missing')
-            sqlite_copy = work / 'v2.db'
-            with sqlite_copy.open('wb') as output:
-                shutil.copyfileobj(database, output)
-            for suffix in ('-wal', '-shm'):
-                try:
-                    sidecar = stream.extractfile('state/data/v2.db' + suffix)
-                except KeyError:
-                    sidecar = None
-                if sidecar is not None:
-                    with (work / ('v2.db' + suffix)).open('wb') as output:
-                        shutil.copyfileobj(sidecar, output)
-        with sqlite3.connect(f'file:{sqlite_copy}?mode=ro', uri=True) as db:
-            if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
-                fail('backup_sqlite_invalid')
+        archive, dump = decrypt_checked(folder, key, manifest, work)
         print('backup_verify=ok', flush=True)
         if target is None:
             return
@@ -497,6 +516,96 @@ def verify_or_stage(args):
                 shutil.rmtree(target)
             raise
         print('restore_stage=ok', flush=True)
+
+
+# NanoClaw's own state below the state root: what its schema migrations and
+# agents change. Signal's store (its ratchet state must never go back), the
+# proxy, the dashboard, configuration and OneCLI are left as they are.
+RESTORE_DIRS = ('data', 'groups', 'store')
+RESTORE_MARGIN = 256 * 1024 * 1024
+
+
+def free_bytes(path):
+    info = os.statvfs(path)
+    return info.f_bavail * info.f_frsize
+
+
+def restore_preflight(state, backup_dir):
+    """Check that restore_state() can run here: plain directories on one filesystem, and room to stage."""
+    folder = private_directory(Path(backup_dir))
+    if os.path.ismount(state) or state.stat().st_dev != state.parent.stat().st_dev:
+        fail('restore_state_mount_unsupported')
+    for name in RESTORE_DIRS:
+        path = state / name
+        if path.is_symlink() or (path.exists() and (not path.is_dir() or os.path.ismount(path) or
+                                                    path.stat().st_dev != state.stat().st_dev)):
+            fail('restore_state_mount_unsupported')
+    manifest = json.loads((folder / 'manifest.json').read_text())
+    size = int(manifest['state']['bytes']) + int(manifest['postgres']['bytes'])
+    # Decrypting needs `size` next to the backup; extracting needs up to `size` next to the state.
+    if folder.stat().st_dev == state.parent.stat().st_dev:
+        enough = free_bytes(state.parent) >= 2 * size + RESTORE_MARGIN
+    else:
+        enough = (free_bytes(folder) >= size + RESTORE_MARGIN and
+                  free_bytes(state.parent) >= size + RESTORE_MARGIN)
+    if not enough:
+        fail('restore_space_insufficient')
+
+
+def restore_state(state, backup_dir, key_file):
+    """Put the backup's data/, groups/ and store/ in place of the current ones, which are kept aside.
+
+    Every writer (host, agents, brokers) must be stopped. The current directories
+    move to `<state>.failed-<time>` next to the state root, for diagnosis; the
+    operator removes it later. A failure midway moves back what was already
+    swapped. Prints fixed labels only.
+    """
+    folder = private_directory(Path(backup_dir))
+    key = source_path(str(key_file), kind='file')
+    manifest = authenticated_manifest(folder, key)
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    holder = state.parent / f'.{state.name}-restore-{stamp}-{secrets.token_hex(3)}'
+    aside = state.parent / f'{state.name}.failed-{stamp}'
+    if aside.exists() or aside.is_symlink():
+        fail('restore_aside_exists')
+    holder.mkdir(mode=0o700)
+    swapped = []
+    try:
+        with tempfile.TemporaryDirectory(prefix='.recovery-restore-', dir=folder) as temp:
+            work = Path(temp)
+            os.chmod(work, 0o700)
+            archive, _ = decrypt_checked(folder, key, manifest, work)
+            extract_checked(archive, holder, [f'state/{name}' for name in RESTORE_DIRS])
+        staged = holder / 'state'
+        with sqlite3.connect(f'file:{staged / "data/v2.db"}?mode=ro', uri=True) as db:
+            if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                fail('staged_sqlite_invalid')
+        aside.mkdir(mode=0o700)
+        for name in RESTORE_DIRS:
+            source, current = staged / name, state / name
+            if not source.is_dir():
+                continue  # the backup has none (e.g. no legacy store/)
+            had = current.exists()
+            if had:
+                os.rename(current, aside / name)
+            swapped.append((name, had))
+            os.rename(source, current)
+        print('state_restore=done', flush=True)
+        print('failed_state_kept=yes', flush=True)
+    except Exception:
+        for name, had in reversed(swapped):
+            try:
+                if (state / name).exists():
+                    os.rename(state / name, holder / f'undo-{name}')
+                if had:
+                    os.rename(aside / name, state / name)
+            except OSError:
+                print('state_restore_undo=failed', flush=True)
+        raise
+    finally:
+        shutil.rmtree(holder, ignore_errors=True)
+        if aside.is_dir() and not any(aside.iterdir()):
+            aside.rmdir()
 
 
 def main():

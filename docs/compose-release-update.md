@@ -53,10 +53,8 @@ control backup and stopped containers intact for manual diagnosis. Even after
 `release_update=healthy`, independently verify the checkout, release marker,
 Compose service health, a synthetic CLI `READY` prompt and the agent image ID.
 
-This tool intentionally does not offer a real-identity override. Before any
-production use, design and rehearse a separate upgrade path that handles
-state/schema changes, active agent sessions, intentionally stopped services,
-private credential migration and full-state rollback.
+The synthetic mode refuses real identities. Installs with real identities use
+the production mode below.
 
 ## Production mode
 
@@ -65,12 +63,32 @@ An install with real channel identities uses `--confirm-production` instead of
 digest-pinned images whose labels match the manifest, unchanged OneCLI,
 PostgreSQL and Signal pins, control-file backup and automatic rollback), plus:
 
-- **Same schema only.** The preflight compares, between the current and the
+- **Schema changes.** The preflight compares, between the current and the
   target commit, every file under `src/db/migrations/`, the module
-  `migrations/` directories and `src/mailbox/sqlite/schema.ts`. Any difference
-  stops it with `schema_change_requires_full_restore`: the rollback restores
-  code and control files, not data, so a release with new migrations needs a
-  procedure that also restores the data. A version bump is allowed.
+  `migrations/` directories and `src/mailbox/sqlite/schema.ts`, and prints
+  `release_update_schema=changed` or `unchanged`. Switching code back cannot
+  undo a migration the new host has already run, so when the schema changes
+  the rollback also puts back NanoClaw's own state from the backup given with
+  `--backup-dir`/`--key-file`: `data/`, `groups/` and `store/` below the state
+  root. Signal's store (its session state must never go back), the proxy,
+  the dashboard, configuration and OneCLI stay as they are; NanoClaw's
+  migrations do not touch them. For this the preflight also requires:
+  - a backup at most 30 minutes old (`backup_too_old_for_schema_change`);
+  - the state root and those three directories as plain directories on one
+    filesystem, not links or mount points (`restore_state_mount_unsupported`);
+  - room to decrypt and extract the backup (`restore_space_insufficient`).
+
+  The data is restored only when the new host has been started, since before
+  that nothing was migrated. The rollback then stops the host, the agents
+  and the brokers, puts the backup's directories in place and starts the
+  previous release on them (phase `restore_state`, label `state_restored=yes`).
+  The replaced directories are kept in `<state root>.failed-<time>` next to
+  the state root for diagnosis; remove it once you no longer need it.
+  **Everything written after the backup is lost**: messages received and
+  agent work done during the maintenance window. Keep the window short:
+  create the backup right before the update, as the dashboard does. If the
+  restore itself fails, the old code is not started on migrated data and
+  the run ends with `rollback=failed_manual_recovery_needed`.
 - **Fresh backup.** The encrypted backup must be of the current release, pass
   `verify`, and be at most `--max-backup-age-minutes` old (default 120).
 - **Running agents.** They are allowed at preflight and stopped right after the
@@ -113,7 +131,7 @@ start time). No paths, identities, values or command output.
 
 | Field | Values |
 | --- | --- |
-| `phase` | `preflight`, `control_backup`, `stop_host`, `switch_release`, `start_services`, `wait_channels`, `refresh_images`, `refresh_dashboard`, `rollback` |
+| `phase` | `preflight`, `control_backup`, `stop_host`, `switch_release`, `start_services`, `wait_channels`, `refresh_images`, `refresh_dashboard`, `rollback`, `restore_state` |
 | `outcome` | `running`, `preflight_ok`, `succeeded`, `failed` (nothing changed), `rolled_back`, `rollback_failed`, `interrupted` |
 | `rollback` | empty, `not_needed`, `healthy`, `failed_manual_recovery_needed` |
 

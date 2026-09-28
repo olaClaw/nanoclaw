@@ -235,7 +235,10 @@ class Sources:
                 found.append((path.stat().st_mtime, release))
         if not found:
             return None
-        return {**max(found, key=lambda item: item[0])[1], 'verified': True}
+        release = max(found, key=lambda item: item[0])[1]
+        change = (schema_change(self.project_root, installed['revision'], release['revision'])
+                  if self.project_root and installed else None)
+        return {**release, 'verified': True, 'schema_change': change}
 
     def backup_folders(self):
         """(public id, folder) for every backup folder with a well-formed manifest."""
@@ -633,6 +636,22 @@ def git(project, *args):
         env.update(HOME=account.pw_dir, USER=account.pw_name, LOGNAME=account.pw_name)
     return subprocess.run(['git', '-C', str(project), *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                           stderr=subprocess.DEVNULL, preexec_fn=as_owner(project), env=env, timeout=300, check=False)
+
+
+# Same rule as compose-release-update.py's schema_fingerprint: the files that define the DB schema.
+SCHEMA_PATHS = ('src/db/migrations', 'src/modules', 'src/mailbox/sqlite/schema.ts')
+
+
+def schema_change(project, current, target):
+    """Whether going from `current` to `target` changes the DB schema; None when git cannot tell."""
+    result = git(Path(project), 'diff', '--name-only', current, target, '--', *SCHEMA_PATHS)
+    if result.returncode:
+        return None
+    for path in result.stdout.decode('utf-8', 'replace').splitlines():
+        if path.endswith('.test.ts') or (path.startswith('src/modules/') and '/migrations/' not in path):
+            continue
+        return True
+    return False
 
 
 def http_get(url, limit):
