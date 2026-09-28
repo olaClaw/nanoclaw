@@ -122,6 +122,7 @@ class HttpsSetupTests(unittest.TestCase):
               patch.object(SETUP, 'dns_plugins', return_value=PLUGINS),
               patch.object(SETUP, 'compose', side_effect=lambda _p, *a, **_k: self.compose_calls.append(a) or ''),
               patch.object(SETUP, 'https_check', return_value=True),
+              patch.object(SETUP, 'http_check', return_value=True),
               patch.object(SETUP, 'local_certificate', side_effect=self.fake_local_certificate),
               contextlib.redirect_stdout(out)):
             try:
@@ -189,6 +190,27 @@ class HttpsSetupTests(unittest.TestCase):
         self.assertIn('check=ok', output)
         self.assertEqual(self.env.read_text(), before)
         self.assertEqual((self.proxy.requests, self.compose_calls), ([], []))
+
+    def test_plain_http_needs_the_confirmation_and_https_switches_it_off_again(self):
+        self.assertEqual(self.run_setup({'mode': 'http', 'bind': '192.0.2.10'})[0], 'invalid_answers')
+        self.assertEqual(self.run_setup({'mode': 'http', 'bind': '0.0.0.0', 'confirm_insecure': True})[0],
+                         'invalid_answers')
+        code, output = self.run_setup({'mode': 'http', 'bind': '192.0.2.10', 'confirm_insecure': True})
+        self.assertEqual(code, 0)
+        env = self.env.read_text()
+        self.assertIn('NANOCLAW_DASHBOARD_ORIGIN=http://192.0.2.10:18080\n', env)
+        self.assertIn('NANOCLAW_DASHBOARD_INSECURE_HTTP=true\n', env)
+        self.assertIn('NANOCLAW_DASHBOARD_HTTP_BIND=192.0.2.10\n', env)
+        self.assertIn('encryption=none', output)
+        self.assertEqual(self.compose_calls, [('stop', 'proxy'),
+                                              ('up', '-d', '--wait', '--no-deps', '--force-recreate', 'dashboard')])
+        self.assertEqual(self.proxy.requests, [])
+        # Back to HTTPS: the opt-in goes and the panel returns to loopback.
+        self.assertEqual(self.run_setup(self.answers())[0], 0)
+        env = self.env.read_text()
+        self.assertIn('NANOCLAW_DASHBOARD_ORIGIN=https://panel.example.invalid\n', env)
+        self.assertIn('NANOCLAW_DASHBOARD_INSECURE_HTTP=\n', env)
+        self.assertIn('NANOCLAW_DASHBOARD_HTTP_BIND=\n', env)
 
     def test_refuses_bad_answers_and_open_answer_files(self):
         for changes in ({'bind': '0.0.0.0'}, {'hostname': 'not a host'}, {'mode': 'plain-http'},

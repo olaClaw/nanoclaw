@@ -137,6 +137,9 @@ services:
       # Required by the service, which refuses to start without an https
       # origin; not `:?` here, so installs without this profile still validate.
       NANOCLAW_DASHBOARD_ORIGIN: ${NANOCLAW_DASHBOARD_ORIGIN:-}
+      # Plain-HTTP opt-in for installs without a certificate (unencrypted):
+      # `true` with an http origin and NANOCLAW_DASHBOARD_HTTP_BIND below.
+      NANOCLAW_DASHBOARD_INSECURE_HTTP: ${NANOCLAW_DASHBOARD_INSECURE_HTTP:-}
       NANOCLAW_DASHBOARD_PORT: '8080'
       # Root-side operations service (scripts/compose-ops.py), when installed.
       NANOCLAW_DASHBOARD_OPS_SOCKET: /run/nanoclaw-ops/ops.sock
@@ -157,8 +160,10 @@ services:
         read_only: true
         bind:
           create_host_path: true
+    # Loopback only, for diagnostics through an SSH tunnel; the plain-HTTP
+    # opt-in publishes it on one LAN/VPN address instead (never 0.0.0.0).
     ports:
-      - 127.0.0.1:${NANOCLAW_DASHBOARD_LOOPBACK_PORT:-18080}:8080
+      - ${NANOCLAW_DASHBOARD_HTTP_BIND:-127.0.0.1}:${NANOCLAW_DASHBOARD_LOOPBACK_PORT:-18080}:8080
     healthcheck:
       test:
         [

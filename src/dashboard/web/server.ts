@@ -38,6 +38,13 @@ import type { DashboardState } from './state.js';
 import { APP_CSS, APP_JS, INDEX_HTML, UI_CSP } from './ui.js';
 
 export const COOKIE = '__Host-nanoclaw_session';
+/**
+ * Plain-HTTP opt-in (no domain for a certificate): browsers drop `Secure`
+ * cookies and the `__Host-` prefix on http, so the cookie is named and set
+ * without them. Everything else stays: HttpOnly, SameSite=Strict, Origin and
+ * CSRF checks. The UI shows an unencrypted-connection warning on every page.
+ */
+export const INSECURE_COOKIE = 'nanoclaw_session';
 export const MAX_BODY_BYTES = 64 * 1024;
 
 const HEADERS: Readonly<Record<string, string>> = {
@@ -77,6 +84,8 @@ export interface DashboardConfig {
   state: DashboardState;
   /** Exact origin the browser uses, e.g. `https://panel.example.invalid`. */
   origin: string;
+  /** Explicit plain-HTTP opt-in for installs without a certificate; see INSECURE_COOKIE. */
+  insecureHttp?: boolean;
   /** The host boundary. */
   forward: Forward;
   /** The operations service; without it, its endpoints stay with `forward` (`not_implemented`). */
@@ -103,16 +112,13 @@ interface Reply {
 
 const requestId = (): string => `req_${randomBytes(8).toString('hex')}`;
 
-function cookieToken(request: http.IncomingMessage): string | undefined {
+function cookieToken(request: http.IncomingMessage, cookie: string): string | undefined {
   for (const part of (request.headers.cookie ?? '').split(';')) {
     const [name, ...rest] = part.trim().split('=');
-    if (name === COOKIE) return rest.join('=');
+    if (name === cookie) return rest.join('=');
   }
   return undefined;
 }
-
-const sessionCookie = (token: string): string => `${COOKIE}=${token}; Path=/; Secure; HttpOnly; SameSite=Strict`;
-const clearedCookie = `${COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0`;
 
 function readBody(request: http.IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -152,6 +158,15 @@ export function createDashboardServer(config: DashboardConfig): http.Server {
   const windows = new Map<string, { start: number; count: number }>();
 
   const generation = (): number => config.state.admin()?.generation ?? 0;
+  const insecure = config.insecureHttp === true;
+  const cookieName = insecure ? INSECURE_COOKIE : COOKIE;
+  const attributes = insecure ? 'Path=/; HttpOnly; SameSite=Strict' : 'Path=/; Secure; HttpOnly; SameSite=Strict';
+  const sessionCookie = (token: string): string => `${cookieName}=${token}; ${attributes}`;
+  const clearedCookie = `${cookieName}=; ${attributes}; Max-Age=0`;
+  // HSTS on plain HTTP is ignored by browsers at best; leave it out.
+  const baseHeaders: Readonly<Record<string, string>> = insecure
+    ? Object.fromEntries(Object.entries(HEADERS).filter(([name]) => name !== 'strict-transport-security'))
+    : HEADERS;
 
   function limit(key: string, rateClass: RateLimitClass): void {
     const at = now();
@@ -283,7 +298,7 @@ export function createDashboardServer(config: DashboardConfig): http.Server {
       if (validate(PATH_PARAMS[name], value).length) throw new HttpError(404, 'not_found');
     }
 
-    const token = cookieToken(request);
+    const token = cookieToken(request, cookieName);
     let session: Session | null = null;
     if (policy.auth !== 'anonymous') {
       session = sessions.get(token, generation());
@@ -332,7 +347,7 @@ export function createDashboardServer(config: DashboardConfig): http.Server {
     const asset = request.method === 'GET' || request.method === 'HEAD' ? uiAsset(request.url) : null;
     if (asset) {
       response.writeHead(200, {
-        ...HEADERS,
+        ...baseHeaders,
         'content-security-policy': UI_CSP,
         'content-type': asset.type,
         'content-length': Buffer.byteLength(asset.body),
@@ -346,7 +361,7 @@ export function createDashboardServer(config: DashboardConfig): http.Server {
       // A cut-off upload leaves the connection unusable: say so, so clients do not reuse it.
       const close = reply.status === 413 ? { connection: 'close' } : {};
       response.writeHead(reply.status, {
-        ...HEADERS,
+        ...baseHeaders,
         ...(reply.headers ?? {}),
         ...close,
         'content-length': Buffer.byteLength(payload),
