@@ -12,6 +12,9 @@ admin UI never needs to be opened:
        - `local`: a certificate generated here, for installs without a domain
          (the connection is encrypted; browsers warn until the certificate is
          trusted on the device);
+       - `http`: no certificate and no proxy, for a trusted LAN/VPN only. The
+         panel is published unencrypted on that address; asked only after an
+         explicit confirmation, and the panel warns on every page;
   2. writes NANOCLAW_DASHBOARD_ORIGIN and NANOCLAW_PROXY_BIND in the private
      .env and recreates `dashboard` and `proxy`;
   3. creates the proxy administrator on a fresh proxy (random password shown
@@ -19,6 +22,11 @@ admin UI never needs to be opened:
   4. obtains or installs the certificate, creates or updates the proxy host
      `https://<hostname>` -> `http://dashboard:8080` (Force SSL, HTTP/2, HSTS);
   5. checks that the panel answers over HTTPS.
+
+In `http` mode steps 3-5 are replaced by: stop the proxy, publish the
+dashboard on the address (NANOCLAW_DASHBOARD_HTTP_BIND, the plain-HTTP
+opt-in NANOCLAW_DASHBOARD_INSECURE_HTTP and an http origin), check that it
+answers. Running an https mode later switches the opt-in off again.
 
 Safe to run again: existing certificates and proxy hosts for the hostname are
 reused. `--check` shows the plan and changes nothing. Prints fixed status
@@ -324,11 +332,18 @@ def gather(args, env, plugins):
         answers = json.loads(path.read_text())
     else:
         answers = {}
+        answers['mode'] = ask('Modalità: "letsencrypt" (serve un dominio), "local" (senza dominio, cifrata) '
+                              'o "http" (senza cifratura)',
+                              lambda v: v in ('letsencrypt', 'local', 'http'), default='letsencrypt')
+        if answers['mode'] == 'http':
+            say(HTTP_WARNING)
+            answers['confirm_insecure'] = ask('Scrivi HTTP per confermare', lambda v: v == 'HTTP') == 'HTTP'
+            answers['bind'] = ask('Indirizzo LAN/VPN su cui pubblicare il pannello', lambda v: valid_bind(v),
+                                  default=env.get('NANOCLAW_DASHBOARD_HTTP_BIND') or env.get('NANOCLAW_PROXY_BIND') or None)
+            return check_answers(answers, plugins)
         answers['hostname'] = ask('Nome del pannello (es. panel.example.org)', lambda v: bool(HOSTNAME.fullmatch(v.lower()))).lower()
         answers['bind'] = ask('Indirizzo LAN/VPN su cui pubblicare la porta 443',
                               lambda v: valid_bind(v), default=env.get('NANOCLAW_PROXY_BIND') or None)
-        answers['mode'] = ask('Certificato: "letsencrypt" (serve un dominio) o "local" (senza dominio)',
-                              lambda v: v in ('letsencrypt', 'local'), default='letsencrypt')
         answers['email'] = ask('Email per l\'amministratore del proxy (e per Let\'s Encrypt)',
                                lambda v: bool(EMAIL.fullmatch(v)))
         if answers['mode'] == 'letsencrypt':
@@ -341,6 +356,14 @@ def gather(args, env, plugins):
             if not lines:
                 fail('provider_credentials_unknown')
             answers['credentials'] = '\n'.join(lines)
+    return check_answers(answers, plugins)
+
+
+def check_answers(answers, plugins):
+    if answers.get('mode') == 'http':
+        if answers.get('confirm_insecure') is not True or not valid_bind(str(answers.get('bind', ''))):
+            fail('invalid_answers')
+        return answers
     answers['hostname'] = str(answers.get('hostname', '')).lower()
     if not HOSTNAME.fullmatch(answers['hostname']) or not valid_bind(str(answers.get('bind', ''))):
         fail('invalid_answers')
@@ -351,12 +374,57 @@ def gather(args, env, plugins):
     return answers
 
 
+HTTP_WARNING = ('ATTENZIONE: in modalità "http" la connessione al pannello NON è cifrata. Password, '
+                'chiavi dei backup e dati passano in chiaro sulla rete: chiunque sulla stessa rete può '
+                'leggerli. Usala solo su una LAN/VPN di cui ti fidi e passa a HTTPS appena possibile.')
+
+
+def origin_host(address):
+    return f'[{address}]' if ':' in address else address
+
+
+def http_check(address, port, seconds=60):
+    deadline = time.time() + seconds
+    url = f'http://{origin_host(address)}:{port}/api/v1/health'
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                if response.status == 200:
+                    return True
+        except (OSError, urllib.error.URLError):
+            pass
+        time.sleep(3)
+    return False
+
+
 def valid_bind(value):
     try:
         address = ipaddress.ip_address(value)
     except ValueError:
         return False
     return not address.is_unspecified and not address.is_multicast
+
+
+def plain_http(project, env_file, env, answers, check):
+    port = env.get('NANOCLAW_DASHBOARD_LOOPBACK_PORT') or '18080'
+    origin = f'http://{origin_host(answers["bind"])}:{port}'
+    say(f'plan=mode:http origin_change:{"no" if env.get("NANOCLAW_DASHBOARD_ORIGIN") == origin else "yes"} '
+        'encryption:none')
+    if check:
+        say('check=ok (nothing changed)')
+        return 0
+    set_env(env_file, {'NANOCLAW_DASHBOARD_ORIGIN': origin, 'NANOCLAW_DASHBOARD_INSECURE_HTTP': 'true',
+                       'NANOCLAW_DASHBOARD_HTTP_BIND': answers['bind']})
+    say('env=updated')
+    # No proxy in this mode: it would keep answering on 443 for the old origin.
+    compose(project, 'stop', 'proxy')
+    compose(project, 'up', '-d', '--wait', '--no-deps', '--force-recreate', 'dashboard')
+    say('services=recreated')
+    ok = http_check(answers['bind'], port)
+    say(f'http={"ok" if ok else "not_answering"} encryption=none')
+    if ok:
+        say(f'Pannello: {origin} (non cifrato)')
+    return 0 if ok else 2
 
 
 def main(argv=None):
@@ -376,6 +444,8 @@ def main(argv=None):
         if not Path(directory).is_dir():
             fail('state_directories_missing')
     answers = gather(args, env, dns_plugins(project))
+    if answers['mode'] == 'http':
+        return plain_http(project, env_file, env, answers, args.check)
     origin = f'https://{answers["hostname"]}'
     say(f'plan=hostname:{answers["hostname"]} mode:{answers["mode"]} origin_change:'
         f'{"no" if env.get("NANOCLAW_DASHBOARD_ORIGIN") == origin else "yes"}'
@@ -383,7 +453,9 @@ def main(argv=None):
     if args.check:
         say('check=ok (nothing changed)')
         return 0
-    set_env(env_file, {'NANOCLAW_DASHBOARD_ORIGIN': origin, 'NANOCLAW_PROXY_BIND': answers['bind']})
+    # An https mode always switches the plain-HTTP opt-in off again.
+    set_env(env_file, {'NANOCLAW_DASHBOARD_ORIGIN': origin, 'NANOCLAW_PROXY_BIND': answers['bind'],
+                       'NANOCLAW_DASHBOARD_INSECURE_HTTP': '', 'NANOCLAW_DASHBOARD_HTTP_BIND': ''})
     say('env=updated')
     compose(project, 'up', '-d', '--wait', '--no-deps', '--force-recreate', 'dashboard', 'proxy')
     say('services=recreated')

@@ -377,6 +377,27 @@ creates the proxy host and checks the panel over HTTPS. Modes:
 - `local`: for installs without a domain. The script generates a certificate
   for the hostname on the host; the connection is encrypted, but browsers
   warn until the certificate is trusted on each device.
+- `http`: **no encryption**, for a trusted LAN/VPN only, when even a local
+  certificate is not an option. Prefer `local`. The script shows the risk
+  and asks you to type `HTTP` to confirm. It then:
+  - stops the proxy;
+  - publishes the dashboard directly on the given address
+    (`NANOCLAW_DASHBOARD_HTTP_BIND`, port `NANOCLAW_DASHBOARD_LOOPBACK_PORT`,
+    default 18080);
+  - sets `NANOCLAW_DASHBOARD_INSECURE_HTTP=true` and the matching `http://`
+    origin.
+
+  In this mode:
+  - passwords, backup keys and data cross the network in clear;
+  - the session cookie drops `Secure` and the `__Host-` prefix (browsers
+    refuse both on http) but keeps HttpOnly, SameSite=Strict, the Origin and
+    CSRF checks;
+  - HSTS is not sent;
+  - every page shows a red "Connessione non cifrata" banner.
+
+  Running the script again in an https mode switches all of this off. The
+  service refuses an http origin without the opt-in, and the opt-in with an
+  https origin.
 
 `--check` prints the plan and changes nothing; running it again reuses the
 certificate and updates the proxy host. The admin UI is still available on

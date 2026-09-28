@@ -28,6 +28,7 @@ export const INDEX_HTML = `<!doctype html>
     <script src="/app.js" defer></script>
   </head>
   <body>
+    <p id="insecure" class="insecure" role="alert" hidden>Connessione non cifrata (HTTP): password e dati passano in chiaro sulla rete. Usala solo su una rete di cui ti fidi e passa a HTTPS appena puoi.</p>
     <div id="login" class="login" hidden>
       <form id="login-form" class="card login-card" autocomplete="off">
         <div class="brand dark">NanoClaw<small>Console privata</small></div>
@@ -95,6 +96,7 @@ export const APP_CSS = `:root {
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 body { margin: 0; font: 16px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--canvas); }
+.insecure { position: sticky; top: 0; z-index: 10; margin: 0; padding: 10px 16px; background: var(--danger); color: #fff; font-weight: 600; text-align: center; }
 button { font: inherit; cursor: pointer; }
 button:focus-visible, input:focus-visible { outline: 3px solid #a8d6b8; outline-offset: 2px; }
 .shell { min-height: 100vh; display: grid; grid-template-columns: 238px minmax(0, 1fr); }
@@ -815,6 +817,10 @@ export const APP_JS = String.raw`'use strict';
         if (result.code === 'already_configured') showLogin(ERRORS.already_configured);
       }
     });
+    // Plain-HTTP opt-in: say so on every page (loopback is a diagnostics tunnel).
+    if (location.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)) {
+      $('insecure').hidden = false;
+    }
     const session = await api('GET', '/session');
     if (session.status === 200) {
       csrf = session.data.csrf_token;

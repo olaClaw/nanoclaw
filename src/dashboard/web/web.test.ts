@@ -26,7 +26,15 @@ import {
   verifyPassword,
   type ScryptParams,
 } from './password.js';
-import { COOKIE, OPS_ENDPOINTS, createDashboardServer, socketForward, type Forward } from './server.js';
+import {
+  COOKIE,
+  INSECURE_COOKIE,
+  OPS_ENDPOINTS,
+  createDashboardServer,
+  socketForward,
+  type DashboardConfig,
+  type Forward,
+} from './server.js';
 import { ABSOLUTE_MS, IDLE_MS, REAUTH_MS, SessionStore } from './sessions.js';
 import { DashboardState } from './state.js';
 import { APP_JS, INDEX_HTML } from './ui.js';
@@ -164,6 +172,21 @@ describe('state directory and local commands', () => {
     expect(() => dashboardConfigFromEnv({ NANOCLAW_DASHBOARD_ORIGIN: `${ORIGIN}/x` })).toThrow('https');
     expect(() => dashboardConfigFromEnv({ NANOCLAW_DASHBOARD_ORIGIN: ORIGIN })).toThrow('STATE_DIR');
   });
+
+  it('accepts an http origin only with the explicit plain-HTTP opt-in', () => {
+    const paths = { NANOCLAW_DASHBOARD_STATE_DIR: '/state', NANOCLAW_DASHBOARD_ADMIN_SOCKET: '/sock' };
+    const http = { ...paths, NANOCLAW_DASHBOARD_ORIGIN: 'http://192.0.2.10:18080' };
+    expect(() => dashboardConfigFromEnv(http)).toThrow('https');
+    expect(() => dashboardConfigFromEnv({ ...http, NANOCLAW_DASHBOARD_INSECURE_HTTP: '1' })).toThrow('https');
+    expect(dashboardConfigFromEnv({ ...http, NANOCLAW_DASHBOARD_INSECURE_HTTP: 'true' })).toMatchObject({
+      origin: 'http://192.0.2.10:18080',
+      insecureHttp: true,
+    });
+    expect(() =>
+      dashboardConfigFromEnv({ ...paths, NANOCLAW_DASHBOARD_ORIGIN: ORIGIN, NANOCLAW_DASHBOARD_INSECURE_HTTP: 'true' }),
+    ).toThrow('http origin');
+    expect(dashboardConfigFromEnv({ ...paths, NANOCLAW_DASHBOARD_ORIGIN: ORIGIN }).insecureHttp).toBe(false);
+  });
 });
 
 interface Response {
@@ -194,10 +217,11 @@ describe('dashboard server end to end over the host boundary', () => {
     endpointState: async () => 'unknown',
   };
 
-  async function start(forward?: Forward, opsForward?: Forward): Promise<void> {
+  async function start(forward?: Forward, opsForward?: Forward, extra: Partial<DashboardConfig> = {}): Promise<void> {
     server = createDashboardServer({
       state,
       origin: ORIGIN,
+      ...extra,
       forward: forward ?? socketForward(path.join(socketDir, 'admin.sock')),
       opsForward,
       now: () => clock,
@@ -592,6 +616,29 @@ describe('dashboard server end to end over the host boundary', () => {
     outcome = 'succeeded';
     expect((await call('POST', '/api/v1/backups', { body: { confirm: true }, headers })).status).toBe(202);
     expect(opsCalls).toContain('POST /api/v1/backups');
+  });
+
+  it('runs over plain HTTP only when opted in, with a cookie browsers keep on http and no HSTS', async () => {
+    const origin = 'http://192.0.2.10:18080';
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await start(undefined, undefined, { origin, insecureHttp: true });
+    const health = await call('GET', '/api/v1/health');
+    expect(health.headers['strict-transport-security']).toBeUndefined();
+    expect(health.headers['content-security-policy']).toContain("frame-ancestors 'none'");
+    const refused = await call('POST', '/api/v1/session', {
+      body: { password: PASSWORD },
+      headers: { origin: ORIGIN },
+    });
+    expect(refused.status).toBe(403);
+    const response = await call('POST', '/api/v1/session', { body: { password: PASSWORD }, headers: { origin } });
+    expect(response.status).toBe(200);
+    const setCookie = String(response.headers['set-cookie']);
+    expect(setCookie).toMatch(new RegExp(`^${INSECURE_COOKIE}=[A-Za-z0-9_-]{43}; Path=/; HttpOnly; SameSite=Strict$`));
+    const cookie = setCookie.split(';')[0];
+    expect((await call('GET', '/api/v1/agents', { headers: { cookie } })).status).toBe(200);
+    // The https cookie name means nothing here.
+    const renamed = cookie.replace(INSECURE_COOKIE, COOKIE);
+    expect((await call('GET', '/api/v1/agents', { headers: { cookie: renamed } })).status).toBe(401);
   });
 
   it('audits state changes with endpoint, status and request id only', async () => {
