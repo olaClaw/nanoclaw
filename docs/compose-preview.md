@@ -255,12 +255,15 @@ screen. The service answers on a Unix socket in
 open; the dashboard mounts that directory read-only. Without it the screens
 say the service is not active and the CLI tools keep working as before.
 
-1. Copy `scripts/compose-ops.py`, `scripts/compose-recovery.py` and
-   `scripts/compose-release-update.py` from a reviewed checkout to
-   `/usr/local/lib/nanoclaw/` (root-owned, `0644`) and check their SHA-256
-   against that checkout.
-2. `install -d -m 750 -o root -g 61001 /var/lib/nanoclaw-ops/sock` and
-   `install -d -m 700 /var/lib/nanoclaw-ops/candidates /var/lib/nanoclaw-ops/jobs`.
+1. Copy `scripts/compose-ops.py`, `scripts/compose-recovery.py`,
+   `scripts/compose-release-update.py`, `scripts/compose-portable.py`,
+   `scripts/compose-import-legacy.py` and `scripts/legacy-snapshot.py` from a
+   reviewed checkout to `/usr/local/lib/nanoclaw/` (root-owned, `0644`) and
+   check their SHA-256 against that checkout.
+2. `install -d -m 750 -o root -g 61001 /var/lib/nanoclaw-ops/sock`,
+   `install -d -m 700 /var/lib/nanoclaw-ops/candidates /var/lib/nanoclaw-ops/jobs` and
+   `install -d -m 700 /var/lib/nanoclaw-ops/portable /var/lib/nanoclaw-ops/portable/{exports,export-keys,imports,work}`
+   (`work` must be on the same filesystem as `/srv/nanoclaw`).
    Link `/var/lib/nanoclaw-ops/{project,backups,keys,release-backups}` to the
    Compose checkout, the backup root, the key root and the release-update
    control root.
@@ -271,6 +274,73 @@ say the service is not active and the CLI tools keep working as before.
    in `/etc/default/nanoclaw-ops` (the default is `production`). Then
    `systemctl daemon-reload && systemctl enable --now nanoclaw-ops nanoclaw-ops-candidates.timer`.
 4. Recreate the `dashboard` service so it sees the socket.
+
+### Moving an install: export and import
+
+**Esporta e importa** moves NanoClaw to another Compose host, or makes a
+test copy of it. Behind it is `scripts/compose-portable.py`, which also runs
+from the terminal.
+
+**Export.** In **Backup**, pick a verified backup and press **Esporta**. If
+its key is no longer on the server (it was saved and shredded), type it in.
+The operations service turns the backup into one file under a **new random
+key**, shown once like a backup key. Save that key in the password manager,
+apart from the file.
+
+The file holds everything needed for continuity: data, agent folders, Signal
+state, OneCLI with its credentials, and the channel and broker configuration.
+It leaves out what belongs to the machine: the proxy (certificates, DNS
+token), the dashboard's administrator, the panel's model settings and the
+public-ID key.
+
+Take the file with **Scarica** in the browser, or over SFTP from
+`/var/lib/nanoclaw-ops/portable/exports/`.
+
+**Import** on the target host (itself installed and running, with its own
+backup set up):
+
+1. Upload the file in **Esporta e importa**, or copy it over SFTP into
+   `/var/lib/nanoclaw-ops/portable/imports/` (as root, `0600`). It then shows
+   up in the list.
+2. **Verifica** with the export key and a mode. This checks, without
+   touching anything:
+   - that the file is authentic;
+   - that the target runs the same release or a newer one (older data is
+     migrated at start);
+   - whether the target is empty or already has agents and chats.
+3. **Applica**:
+   - the operations service first makes a fresh encrypted backup of the
+     target, whose key the panel then offers to save;
+   - it then stops the NanoClaw services (not the panel), replaces the state
+     and starts them again;
+   - if anything fails, it puts the target back from that backup by itself.
+
+   Replacing a target that already has data needs its own confirmation.
+
+Modes:
+
+- **Copia di prova** (default): Signal's account state and the Signal and
+  Telegram identities are not copied (the target's own are removed too);
+  pending tasks are paused and pending chat is closed. The copy never
+  talks to real contacts.
+- **Migrazione definitiva**: queues, tasks, Signal state and identities come
+  along. Only after the source is stopped for good: two installs with the
+  same identities answer twice and can break Signal's sessions. The panel
+  asks you to confirm it.
+
+The target keeps its own images, install ID, LLM endpoint, proxy, dashboard
+and paths. Only model, timezone and gateway settings (and the identities in
+a migration) come from the file.
+
+Files are transferred without size limits through the proxy: the guided
+HTTPS setup configures this. Rerun it once on an existing proxy.
+
+From the terminal:
+- `compose-portable.py export --backup-dir … --backup-key … --export-root … --key-root …`
+- `compose-portable.py import --project-root … --state-root … --bundle … --key-file … --work-root … --mode rehearsal|migration`,
+  plus `--target-backup-dir/--target-backup-key` and `--apply` to change
+  anything;
+- `--rollback-txn` undoes an import.
 
 ### Changing the LLM and model from the panel
 

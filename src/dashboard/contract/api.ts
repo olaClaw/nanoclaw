@@ -32,6 +32,8 @@ export const PUBLIC_ID_PREFIXES = {
   channel: 'chn',
   session: 'ses',
   backup: 'bkp',
+  export: 'exp',
+  import: 'imp',
 } as const;
 export type PublicIdKind = keyof typeof PUBLIC_ID_PREFIXES;
 
@@ -40,6 +42,8 @@ export const agentId = publicId('agent');
 export const channelId = publicId('channel');
 export const sessionId = publicId('session');
 export const backupId = publicId('backup');
+export const exportId = publicId('export');
+export const importId = publicId('import');
 /** Jobs get a random ID when created, so no derivation is needed. */
 export const jobId = str(20, /^job_[0-9a-f]{16}$/);
 export const preflightId = str(20, /^pfl_[0-9a-f]{16}$/);
@@ -274,6 +278,59 @@ export const backupKeyState = object({ backup: backupId, key_on_host: bool });
 export const backupDeleted = object({ backup: backupId, deleted: bool });
 export const backupCreateRequest = object({ confirm: confirmed });
 
+// ── Portable export and import (D5) ──
+
+/** A portable key: 256 random bits, shown once after an export, typed back for an import. */
+export const portableKey = str(64, /^[0-9a-f]{64}$/);
+export const exportList = page(
+  object({
+    id: exportId,
+    created_at: timestamp,
+    release_revision: revision,
+    size_bytes: int(0, Number.MAX_SAFE_INTEGER),
+    /** The export's key is still on the server, waiting to be saved by the operator. */
+    key_on_host: bool,
+  }),
+);
+export const exportKey = object({ export: exportId, key: portableKey });
+export const exportKeyState = object({ export: exportId, key_on_host: bool });
+export const exportDeleted = object({ export: exportId, deleted: bool });
+/** The backup's own key, typed back when it is no longer on the server (it was saved and shredded). */
+export const backupExportRequest = object({ confirm: confirmed, backup_key: nullable(portableKey) });
+export const importMode = oneOf('rehearsal', 'migration');
+export const importList = page(
+  object({
+    id: importId,
+    received_at: timestamp,
+    size_bytes: int(0, Number.MAX_SAFE_INTEGER),
+    /** Uploaded through the panel, or copied by the operator into the import folder (SFTP). */
+    origin: oneOf('upload', 'folder'),
+    /** The last successful preflight of this file, if any. */
+    check: nullable(
+      object({
+        mode: importMode,
+        target: oneOf('empty', 'populated'),
+        release: oneOf('same', 'older'),
+        checked_at: timestamp,
+      }),
+    ),
+  }),
+);
+export const importUploaded = object({ import: importId });
+export const importPreflightRequest = object({ key: portableKey, mode: importMode });
+/**
+ * `replace`: the target has agents or chats and may be replaced. `source_stopped`:
+ * required for a migration, so two installs never run the same identities.
+ */
+export const importApplyRequest = object({
+  key: portableKey,
+  mode: importMode,
+  replace: bool,
+  source_stopped: bool,
+  confirm: confirmed,
+});
+export const importDeleted = object({ import: importId, deleted: bool });
+
 export type Overview = Infer<typeof overview>;
 export type AgentSummary = Infer<typeof agentSummary>;
 export type AgentDetail = Infer<typeof agentDetail>;
@@ -291,15 +348,22 @@ export interface Endpoint {
   readonly request: Schema | null;
   /** `null` means 204 No Content. */
   readonly response: Schema | null;
-  /** `draft` endpoints depend on a later epic's design (export/import format). */
+  /** `draft` endpoints depend on a later epic's design. */
   readonly status: 'v1' | 'draft';
   readonly epic: `D${number}` | `D${number}a`;
+  /**
+   * Binary streams instead of JSON: `download` answers with the file itself
+   * (`response` null), `upload` takes the raw file as the body (`request` null).
+   */
+  readonly stream?: 'download' | 'upload';
 }
 
 export const PATH_PARAMS: Readonly<Record<string, Schema>> = {
   agent: agentId,
   channel: channelId,
   backup: backupId,
+  export: exportId,
+  import: importId,
   job: jobId,
   kind: secretKind,
 };
@@ -534,32 +598,105 @@ export const ENDPOINTS: readonly Endpoint[] = [
     status: 'v1',
     epic: 'D4',
   },
-  // Export/import payloads (one-time key delivery, upload framing) are settled in D5.
   {
     name: 'backup_export',
     method: 'POST',
     path: '/api/v1/backups/{backup}/export',
-    request: backupCreateRequest,
+    request: backupExportRequest,
     response: jobAccepted,
-    status: 'draft',
+    status: 'v1',
     epic: 'D5',
+  },
+  {
+    name: 'exports',
+    method: 'GET',
+    path: '/api/v1/exports',
+    request: null,
+    response: exportList,
+    status: 'v1',
+    epic: 'D5',
+  },
+  {
+    name: 'export_key',
+    method: 'POST',
+    path: '/api/v1/exports/{export}/key',
+    request: backupCreateRequest,
+    response: exportKey,
+    status: 'v1',
+    epic: 'D5',
+  },
+  {
+    name: 'export_key_saved',
+    method: 'POST',
+    path: '/api/v1/exports/{export}/key/saved',
+    request: backupCreateRequest,
+    response: exportKeyState,
+    status: 'v1',
+    epic: 'D5',
+  },
+  {
+    name: 'export_download',
+    method: 'GET',
+    path: '/api/v1/exports/{export}/download',
+    request: null,
+    response: null,
+    status: 'v1',
+    epic: 'D5',
+    stream: 'download',
+  },
+  {
+    name: 'export_delete',
+    method: 'POST',
+    path: '/api/v1/exports/{export}/delete',
+    request: backupCreateRequest,
+    response: exportDeleted,
+    status: 'v1',
+    epic: 'D5',
+  },
+  {
+    name: 'imports',
+    method: 'GET',
+    path: '/api/v1/imports',
+    request: null,
+    response: importList,
+    status: 'v1',
+    epic: 'D5',
+  },
+  {
+    name: 'import_upload',
+    method: 'POST',
+    path: '/api/v1/imports',
+    request: null,
+    response: importUploaded,
+    status: 'v1',
+    epic: 'D5',
+    stream: 'upload',
   },
   {
     name: 'import_preflight',
     method: 'POST',
-    path: '/api/v1/imports/preflight',
-    request: null,
+    path: '/api/v1/imports/{import}/preflight',
+    request: importPreflightRequest,
     response: jobAccepted,
-    status: 'draft',
+    status: 'v1',
     epic: 'D5',
   },
   {
     name: 'import_apply',
     method: 'POST',
-    path: '/api/v1/imports/{job}/apply',
-    request: object({ mode: oneOf('rehearsal', 'migration'), confirm: confirmed }),
+    path: '/api/v1/imports/{import}/apply',
+    request: importApplyRequest,
     response: jobAccepted,
-    status: 'draft',
+    status: 'v1',
+    epic: 'D5',
+  },
+  {
+    name: 'import_delete',
+    method: 'POST',
+    path: '/api/v1/imports/{import}/delete',
+    request: backupCreateRequest,
+    response: importDeleted,
+    status: 'v1',
     epic: 'D5',
   },
 ];

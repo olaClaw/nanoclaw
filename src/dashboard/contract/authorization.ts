@@ -87,8 +87,17 @@ export const POLICIES: Readonly<Record<string, EndpointPolicy>> = {
   backup_key_saved: dangerous(),
   backup_delete: dangerous({ lock: 'maintenance' }),
   backup_export: dangerous(),
+  exports: read,
+  export_key: dangerous(),
+  export_key_saved: dangerous(),
+  // The file is encrypted under a key that never leaves through this route.
+  export_download: read,
+  export_delete: dangerous(),
+  imports: read,
+  import_upload: dangerous({ confirm: false }),
   import_preflight: dangerous({ confirm: false }),
   import_apply: dangerous({ lock: 'maintenance' }),
+  import_delete: dangerous(),
 };
 
 export function policyFor(name: string): EndpointPolicy {

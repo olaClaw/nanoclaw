@@ -258,6 +258,12 @@ def ensure_certificate(proxy, answers, workdir):
     return body['id']
 
 
+# Export files (several GB) go through the panel: no body size limit at the
+# proxy (the dashboard enforces its own), no buffering to disk, long timeouts.
+PROXY_TRANSFER_CONFIG = ('client_max_body_size 0;\nproxy_request_buffering off;\nproxy_buffering off;\n'
+                         'proxy_read_timeout 3600s;\nproxy_send_timeout 3600s;\n')
+
+
 def ensure_proxy_host(proxy, hostname, certificate_id):
     status, items = proxy.call('GET', '/nginx/proxy-hosts')
     if status != 200 or not isinstance(items, list):
@@ -265,7 +271,7 @@ def ensure_proxy_host(proxy, hostname, certificate_id):
     body = {'domain_names': [hostname], 'forward_scheme': 'http', 'forward_host': 'dashboard', 'forward_port': 8080,
             'certificate_id': certificate_id, 'ssl_forced': True, 'http2_support': True, 'hsts_enabled': True,
             'hsts_subdomains': False, 'block_exploits': True, 'caching_enabled': False,
-            'allow_websocket_upgrade': False, 'access_list_id': 0, 'advanced_config': '', 'locations': [],
+            'allow_websocket_upgrade': False, 'access_list_id': 0, 'advanced_config': PROXY_TRANSFER_CONFIG, 'locations': [],
             'meta': {}}
     existing = next((item for item in items if isinstance(item, dict) and hostname in (item.get('domain_names') or [])),
                     None)

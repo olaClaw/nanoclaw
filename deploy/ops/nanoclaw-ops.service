@@ -1,5 +1,5 @@
 # Root-side operations service for the NanoClaw dashboard: releases, backups,
-# update jobs, and backups and release updates started from the panel. Install the scripts from a
+# update jobs, and backups, release updates, exports and imports started from the panel. Install the scripts from a
 # reviewed checkout (see docs/compose-preview.md), then:
 #   systemctl daemon-reload && systemctl enable --now nanoclaw-ops
 # The paths under /var/lib/nanoclaw-ops are links to this host's checkout,
@@ -22,6 +22,7 @@ ExecStart=/usr/bin/python3 /usr/local/lib/nanoclaw/compose-ops.py serve \
   --control-backup-root /var/lib/nanoclaw-ops/release-backups \
   --candidates /var/lib/nanoclaw-ops/candidates \
   --jobs-dir /var/lib/nanoclaw-ops/jobs \
+  --portable-root /var/lib/nanoclaw-ops/portable \
   --update-mode ${NANOCLAW_OPS_UPDATE_MODE}
 Restart=on-failure
 RestartSec=5

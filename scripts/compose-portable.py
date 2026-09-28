@@ -247,9 +247,12 @@ def preflight(args):
     bundle = RECOVERY.source_path(args.bundle, kind='file')
     key = RECOVERY.source_path(args.key_file, kind='file')
     work = RECOVERY.private_directory(Path(args.work_root))
-    backup = RECOVERY.private_directory(Path(args.target_backup_dir))
-    backup_key = RECOVERY.source_path(args.target_backup_key, kind='file')
-    for path in (bundle.parent, key.parent, work, backup, backup_key.parent):
+    # A preflight alone may run without the target's backup; `--apply` needs it.
+    checked_backup = bool(args.target_backup_dir)
+    require(checked_backup or not args.apply, 'target_backup_required')
+    backup = RECOVERY.private_directory(Path(args.target_backup_dir)) if checked_backup else None
+    backup_key = RECOVERY.source_path(args.target_backup_key, kind='file') if checked_backup else None
+    for path in (bundle.parent, key.parent, work, *((backup, backup_key.parent) if checked_backup else ())):
         RECOVERY.not_nested(path, project)
         RECOVERY.not_nested(path, state)
     require(not key.stat().st_mode & 0o077 and key.stat().st_uid == 0, 'key_unsafe')
@@ -263,9 +266,11 @@ def preflight(args):
     require(marker.get('commit') == release.get('revision'), 'target_release_inconsistent')
     _, head = LEGACY.run(['git', '-c', f'safe.directory={project}', '-C', str(project), 'rev-parse', 'HEAD'])
     require(head == release.get('revision'), 'target_checkout_mismatch')
-    backup_manifest = json.loads((backup / 'manifest.json').read_text())
-    require(backup_manifest.get('revision') == release['revision'], 'target_backup_release_mismatch')
-    RECOVERY.verify_or_stage(argparse.Namespace(action='verify', backup_dir=str(backup), key_file=str(backup_key)))
+    if checked_backup:
+        backup_manifest = json.loads((backup / 'manifest.json').read_text())
+        require(backup_manifest.get('revision') == release['revision'], 'target_backup_release_mismatch')
+        RECOVERY.verify_or_stage(argparse.Namespace(action='verify', backup_dir=str(backup),
+                                                    key_file=str(backup_key)))
     require(LEGACY.services_healthy(project), 'target_services_unhealthy')
     empty = target_is_empty(state / 'data/v2.db')
     target_migrations = set(migrations_of(state / 'data/v2.db'))
@@ -482,9 +487,9 @@ def main(argv=None):
     for flag in ('backup-dir', 'backup-key', 'export-root', 'key-root'):
         out.add_argument('--' + flag, required=True)
     inp = sub.add_parser('import')
-    for flag in ('project-root', 'state-root', 'target-backup-dir', 'target-backup-key'):
+    for flag in ('project-root', 'state-root'):
         inp.add_argument('--' + flag, required=True)
-    for flag in ('bundle', 'key-file', 'work-root', 'rollback-txn'):
+    for flag in ('target-backup-dir', 'target-backup-key', 'bundle', 'key-file', 'work-root', 'rollback-txn'):
         inp.add_argument('--' + flag)
     inp.add_argument('--mode', choices=MODES)
     inp.add_argument('--confirm-replace-target-state', action='store_true')
@@ -497,8 +502,10 @@ def main(argv=None):
     if args.action == 'export':
         export(args)
         return
+    require(bool(args.target_backup_dir) == bool(args.target_backup_key), 'invalid_arguments')
     if args.rollback_txn:
-        require(not (args.bundle or args.key_file or args.work_root or args.mode), 'invalid_arguments')
+        require(args.target_backup_dir and not (args.bundle or args.key_file or args.work_root or args.mode),
+                'invalid_arguments')
         rollback(args)
         return
     require(args.bundle and args.key_file and args.work_root and args.mode, 'invalid_arguments')

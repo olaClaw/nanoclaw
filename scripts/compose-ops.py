@@ -39,6 +39,7 @@ import socketserver
 import stat
 import subprocess
 import sys
+import tarfile
 import threading
 import urllib.request
 from datetime import datetime, timezone
@@ -69,6 +70,18 @@ KEY = re.compile(r'[0-9a-f]{64}\Z')
 BACKUP_PHASES = {'backup', 'done'}
 UPDATE_PHASES = {'pull', 'backup', 'update', 'done'}
 UPDATE_MODES = {'production': '--confirm-production', 'synthetic': '--confirm-synthetic'}
+EXPORT_ID = re.compile(r'exp_[0-9a-f]{32}\Z')
+IMPORT_ID = re.compile(r'imp_[0-9a-f]{32}\Z')
+EXPORT_FILE = re.compile(r'([0-9a-f]{8})-(\d{8}T\d{6}Z)-[0-9a-f]{6}\.ncx\Z')
+IMPORT_FILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.ncx\Z')
+IMPORT_MODES = {'rehearsal', 'migration'}
+EXPORT_PHASES = {'export', 'done'}
+PREFLIGHT_PHASES = {'preflight', 'done'}
+APPLY_PHASES = {'backup', 'import', 'rollback', 'done'}
+KIND_PHASES = {'update': UPDATE_PHASES, 'backup_create': BACKUP_PHASES, 'backup_export': EXPORT_PHASES,
+               'import_preflight': PREFLIGHT_PHASES, 'import_apply': APPLY_PHASES}
+MAX_UPLOAD = 64 << 30
+CHUNK = 1 << 20
 
 
 class OpsError(Exception):
@@ -133,7 +146,7 @@ def shred(path):
 class Sources:
     def __init__(self, state_root, backup_root, control_root, candidates, id_key,
                  key_root=None, project_root=None, jobs_dir=None, recovery_script=None,
-                 update_script=None, update_mode=None):
+                 update_script=None, update_mode=None, portable_root=None, portable_script=None):
         self.state_root = Path(state_root).resolve()
         self.backup_root = Path(backup_root).resolve()
         self.control_root = Path(control_root).resolve()
@@ -150,10 +163,11 @@ class Sources:
         self.update_script = Path(update_script) if update_script else None
         self.update_mode = update_mode if update_mode in UPDATE_MODES else None
         self.running = threading.Lock()
+        self.portable = Portable(self, portable_root, portable_script) if portable_root and portable_script else None
 
     def public_id(self, kind, internal):
         digest = hmac.new(self.id_key, f'{kind}\0{internal}'.encode(), hashlib.sha256).hexdigest()[:32]
-        return {'backup': 'bkp_'}[kind] + digest
+        return {'backup': 'bkp_', 'export': 'exp_', 'import': 'imp_'}[kind] + digest
 
     def release(self, path):
         record = private_json(path)
@@ -283,7 +297,7 @@ class Sources:
                 'size_bytes': size,
                 # The backup tool writes the manifest only after verifying the archive.
                 'verification': 'verified' if isinstance(manifest.get('hmac_sha256'), str) else 'unverified',
-                'exportable': False,
+                'exportable': self.portable is not None and isinstance(manifest.get('hmac_sha256'), str),
                 'key_on_host': self.key_on_host(folder),
             })
         items.sort(key=lambda item: item['created_at'], reverse=True)
@@ -367,8 +381,8 @@ class Sources:
         started = iso(record.get('started_utc'))
         backup = record.get('backup')
         category = record.get('failure_category')
-        kind = 'update' if record.get('kind') == 'update' else 'backup_create'
-        phases = UPDATE_PHASES if kind == 'update' else BACKUP_PHASES
+        kind = record.get('kind') if record.get('kind') in KIND_PHASES else 'backup_create'
+        phases = KIND_PHASES[kind]
         release = None
         if kind == 'update':
             target = record.get('to_revision')
@@ -405,6 +419,63 @@ class Sources:
                     projected['outcome'] = 'interrupted'
                 return projected
         return None
+
+    def start_ops_job(self, kind, phase, work, *, lock):
+        """Run `work(record)` in the background as one ops job; `lock` also takes the maintenance lock."""
+        if not self.jobs_dir:
+            raise OpsError(501, 'not_implemented')
+        if self.model_change_pending():
+            raise OpsError(409, 'operation_in_progress')
+        if not self.running.acquire(blocking=False):
+            raise OpsError(409, 'operation_in_progress')
+        fd = None
+        try:
+            if lock:
+                fd = os.open(self.control_root / LOCK_FILE, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise OpsError(409, 'operation_in_progress')
+            job_id = secrets.token_hex(8)
+            at = now_utc()
+            record = {'job_id': job_id, 'kind': kind, 'phase': phase, 'outcome': 'running',
+                      'failure_category': None, 'rollback': None, 'backup': None, 'started_utc': at,
+                      'updated_utc': at, 'finished_utc': None, 'phases': [{'phase': phase, 'at': at}]}
+            write_private(self.ops_job_path(job_id), record)
+        except BaseException:
+            if fd is not None:
+                os.close(fd)
+            self.running.release()
+            raise
+
+        def body():
+            try:
+                work(record)
+            except Exception:
+                record.update(outcome='failed', failure_category='unexpected_error')
+            finally:
+                at = now_utc()
+                if record['outcome'] == 'running':
+                    record['outcome'] = 'failed'
+                if not CODE.fullmatch(str(record.get('failure_category') or 'x')):
+                    record['failure_category'] = 'unexpected_error'
+                record.update(phase='done', updated_utc=at, finished_utc=at)
+                record['phases'].append({'phase': 'done', 'at': at})
+                try:
+                    write_private(self.ops_job_path(record['job_id']), record)
+                finally:
+                    if fd is not None:
+                        os.close(fd)
+                    self.running.release()
+
+        threading.Thread(target=body, daemon=True).start()
+        return {'job': {'id': 'job_' + job_id, 'kind': kind}}
+
+    def ops_phase(self, record, name):
+        at = now_utc()
+        record.update(phase=name, updated_utc=at)
+        record['phases'].append({'phase': name, 'at': at})
+        write_private(self.ops_job_path(record['job_id']), record)
 
     def start_backup(self):
         if not (self.key_root and self.project_root and self.jobs_dir and self.recovery_script):
@@ -482,6 +553,289 @@ def run_tool(argv, timeout):
 def last_value(lines, key):
     values = [line.split('=', 1)[1] for line in lines if line.startswith(key + '=')]
     return values[-1] if values else None
+
+
+def secret_file(directory, name, value):
+    """A root-only file holding one key for the duration of a job."""
+    path = directory / name
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'w') as stream:
+        stream.write(value + '\n')
+    return path
+
+
+class Portable:
+    """Portable export and import (D5) through compose-portable.py.
+
+    Layout below `root` (all 0700, root-owned): `exports/` (the .ncx files),
+    `export-keys/` (a key until the operator saves it), `imports/` (uploads,
+    and files the operator copies in over SFTP), `work/` (the import work area,
+    on the state's filesystem). Keys typed in the panel live in `work/` for the
+    duration of one job only.
+    """
+
+    def __init__(self, sources, root, script):
+        self.s = sources
+        self.root = Path(root).resolve()
+        self.exports, self.keys, self.imports, self.work = (
+            self.root / name for name in ('exports', 'export-keys', 'imports', 'work'))
+        self.checks = self.imports / '.checks'
+        self.script = Path(script)
+
+    def require_ready(self):
+        s = self.s
+        if not (s.key_root and s.project_root and s.jobs_dir and s.recovery_script):
+            raise OpsError(501, 'not_implemented')
+        for directory in (self.exports, self.keys, self.imports, self.work):
+            info = directory.lstat() if directory.exists() else None
+            if not info or not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
+                raise OpsError(503, 'portable_storage_unavailable')
+
+    def tool(self, *args, timeout=4 * 3600):
+        return run_tool([str(self.script), *args], timeout)
+
+    # ── Exports ──
+
+    def export_files(self):
+        found = []
+        if not self.exports.is_dir():
+            return found
+        for path in self.exports.iterdir():
+            if EXPORT_FILE.fullmatch(path.name) and path.is_file() and not path.is_symlink():
+                found.append((self.s.public_id('export', path.name), path))
+        return found
+
+    def export_key(self, path):
+        return self.keys / (path.name[:-len('.ncx')] + '.key')
+
+    def exports_list(self):
+        items = []
+        for public, path in self.export_files():
+            match = EXPORT_FILE.fullmatch(path.name)
+            revision = None
+            try:
+                with tarfile.open(path, 'r:') as stream:
+                    member = stream.getmember('manifest.json')
+                    if member.isfile() and member.size <= 64 * 1024:
+                        revision = json.load(stream.extractfile(member)).get('revision')
+            except (OSError, KeyError, ValueError, tarfile.TarError):
+                revision = None
+            if not isinstance(revision, str) or not REVISION.fullmatch(revision) or \
+                    not revision.startswith(match.group(1)):
+                continue
+            key = self.export_key(path)
+            items.append({'id': public, 'created_at': iso(match.group(2)), 'release_revision': revision,
+                          'size_bytes': path.stat().st_size, 'key_on_host': key.is_file() and not key.is_symlink()})
+        items.sort(key=lambda item: item['created_at'], reverse=True)
+        return items
+
+    def resolve_export(self, public):
+        if not EXPORT_ID.fullmatch(public):
+            raise OpsError(404, 'not_found')
+        for candidate, path in self.export_files():
+            if hmac.compare_digest(candidate, public):
+                return path
+        raise OpsError(404, 'not_found')
+
+    def reveal_export_key(self, public):
+        key = self.export_key(self.resolve_export(public))
+        if not key.is_file() or key.is_symlink():
+            raise OpsError(409, 'key_not_on_host')
+        info, value = key.lstat(), key.read_text().strip()
+        if info.st_mode & 0o077 or not KEY.fullmatch(value):
+            raise OpsError(500, 'key_unreadable')
+        return {'export': public, 'key': value}
+
+    def forget_export_key(self, public):
+        key = self.export_key(self.resolve_export(public))
+        if key.is_file() and not key.is_symlink():
+            shred(key)
+        return {'export': public, 'key_on_host': False}
+
+    def delete_export(self, public):
+        path = self.resolve_export(public)
+        key = self.export_key(path)
+        if key.is_file() and not key.is_symlink():
+            shred(key)
+        path.unlink()
+        return {'export': public, 'deleted': True}
+
+    def start_export(self, backup_public, backup_key):
+        self.require_ready()
+        folder = self.s.resolve_backup(backup_public)
+        if backup_key is None and not self.s.key_on_host(folder):
+            raise OpsError(409, 'backup_key_required')
+
+        def work(record):
+            temp = None
+            try:
+                key = self.s.key_path(folder)
+                if backup_key is not None:
+                    temp = key = secret_file(self.work, f'{record["job_id"]}.backup.key', backup_key)
+                code, lines = self.tool('export', '--backup-dir', str(folder), '--backup-key', str(key),
+                                        '--export-root', str(self.exports), '--key-root', str(self.keys))
+                if code == 0 and 'export=created' in lines:
+                    record.update(outcome='succeeded', failure_category=None)
+                else:
+                    record['failure_category'] = last_value(lines, 'failure_category') or 'export_failed'
+            finally:
+                if temp is not None:
+                    shred(temp)
+
+        return self.s.start_ops_job('backup_export', 'export', work, lock=False)
+
+    # ── Imports ──
+
+    def import_files(self):
+        found = []
+        if not self.imports.is_dir():
+            return found
+        for path in self.imports.iterdir():
+            if IMPORT_FILE.fullmatch(path.name) and path.is_file() and not path.is_symlink():
+                found.append((self.s.public_id('import', path.name), path))
+        return found
+
+    def check_path(self, path):
+        return self.checks / (path.name + '.json')
+
+    def imports_list(self):
+        items = []
+        for public, path in self.import_files():
+            info = path.stat()
+            check = private_json(self.check_path(path)) if self.check_path(path).is_file() else None
+            valid = (isinstance(check, dict) and check.get('mode') in IMPORT_MODES and
+                     check.get('target') in ('empty', 'populated') and check.get('release') in ('same', 'older') and
+                     iso(check.get('checked_utc')) and check.get('size') == info.st_size)
+            items.append({
+                'id': public,
+                'received_at': iso(datetime.fromtimestamp(info.st_mtime, timezone.utc).strftime('%Y%m%dT%H%M%SZ')),
+                'size_bytes': info.st_size,
+                'origin': 'upload' if path.name.startswith('upload-') else 'folder',
+                'check': {'mode': check['mode'], 'target': check['target'], 'release': check['release'],
+                          'checked_at': iso(check['checked_utc'])} if valid else None,
+            })
+        items.sort(key=lambda item: item['received_at'], reverse=True)
+        return items
+
+    def resolve_import(self, public):
+        if not IMPORT_ID.fullmatch(public):
+            raise OpsError(404, 'not_found')
+        for candidate, path in self.import_files():
+            if hmac.compare_digest(candidate, public):
+                return path
+        raise OpsError(404, 'not_found')
+
+    def delete_import(self, public):
+        path = self.resolve_import(public)
+        self.check_path(path).unlink(missing_ok=True)
+        path.unlink()
+        return {'import': public, 'deleted': True}
+
+    def receive(self, stream, length):
+        """Store an uploaded file in the import folder; nothing is read or extracted here."""
+        self.require_ready()
+        if length <= 0 or length > MAX_UPLOAD:
+            raise OpsError(413, 'payload_too_large')
+        # Room for the file and for an import to decrypt and extract it.
+        if shutil.disk_usage(self.imports).free < 3 * length + (1 << 30):
+            raise OpsError(507, 'import_space_insufficient')
+        name = f'upload-{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")}-{secrets.token_hex(3)}.ncx'
+        partial = self.imports / f'.{name}.partial'
+        fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(fd, 'wb') as output:
+                remaining = length
+                while remaining:
+                    chunk = stream.read(min(CHUNK, remaining))
+                    if not chunk:
+                        raise OpsError(400, 'upload_incomplete')
+                    output.write(chunk)
+                    remaining -= len(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(partial, self.imports / name)
+        except BaseException:
+            partial.unlink(missing_ok=True)
+            raise
+        return {'import': self.s.public_id('import', name)}
+
+    def import_args(self, path, key, mode):
+        return ('import', '--project-root', str(self.s.project_root), '--state-root', str(self.s.state_root),
+                '--bundle', str(path), '--key-file', str(key), '--work-root', str(self.work), '--mode', mode)
+
+    def start_preflight(self, public, key_value, mode):
+        self.require_ready()
+        path = self.resolve_import(public)
+
+        def work(record):
+            key = secret_file(self.work, f'{record["job_id"]}.import.key', key_value)
+            try:
+                code, lines = self.tool(*self.import_args(path, key, mode))
+            finally:
+                shred(key)
+            target, release = last_value(lines, 'import_target'), last_value(lines, 'import_release')
+            if code == 0 and 'import_preflight=ok' in lines and target in ('empty', 'populated'):
+                self.checks.mkdir(mode=0o700, exist_ok=True)
+                write_private(self.check_path(path), {
+                    'mode': mode, 'target': target, 'size': path.stat().st_size, 'checked_utc': now_utc(),
+                    'release': 'same' if release == 'same' else 'older'})
+                record.update(outcome='succeeded', failure_category=None)
+            else:
+                record['failure_category'] = last_value(lines, 'failure_category') or 'import_preflight_failed'
+
+        return self.s.start_ops_job('import_preflight', 'preflight', work, lock=False)
+
+    def start_apply(self, public, key_value, mode, replace, source_stopped):
+        self.require_ready()
+        path = self.resolve_import(public)
+        if mode == 'migration' and not source_stopped:
+            raise OpsError(409, 'source_stopped_confirmation_required')
+        s = self.s
+
+        def work(record):
+            # A fresh, verified backup of this install first: the import's rollback needs it.
+            before = {folder.name for _, folder in s.backup_folders()}
+            code, lines = run_tool([str(s.recovery_script), 'backup', '--project-root', str(s.project_root),
+                                    '--state-root', str(s.state_root), '--backup-root', str(s.backup_root),
+                                    '--key-root', str(s.key_root), '--apply'], 4 * 3600)
+            new = [folder for _, folder in s.backup_folders() if folder.name not in before]
+            if code or 'backup=verified' not in lines or len(new) != 1:
+                record['failure_category'] = last_value(lines, 'failure_category') or 'backup_failed'
+                record['rollback'] = 'not_needed'
+                return
+            backup = new[0]
+            record['backup'] = s.public_id('backup', backup.name)
+            s.ops_phase(record, 'import')
+            key = secret_file(self.work, f'{record["job_id"]}.import.key', key_value)
+            try:
+                flags = ['--apply']
+                if replace:
+                    flags.append('--confirm-replace-target-state')
+                if mode == 'migration':
+                    flags.append('--confirm-source-stopped')
+                code, lines = self.tool(*self.import_args(path, key, mode), '--target-backup-dir', str(backup),
+                                        '--target-backup-key', str(s.key_path(backup)), *flags)
+            finally:
+                shred(key)
+            if code == 0 and 'import=healthy' in lines:
+                record.update(outcome='succeeded', failure_category=None, rollback='not_needed')
+                return
+            record['failure_category'] = last_value(lines, 'failure_category') or 'import_failed'
+            txn = last_value(lines, 'import_transaction')
+            if not txn or not re.fullmatch(r'\d{8}T\d{6}Z-[0-9a-f]{6}', txn):
+                record['rollback'] = 'not_needed'  # it stopped before changing anything
+                return
+            s.ops_phase(record, 'rollback')
+            code, lines = self.tool('import', '--project-root', str(s.project_root), '--state-root',
+                                    str(s.state_root), '--rollback-txn', str(self.work / txn),
+                                    '--target-backup-dir', str(backup), '--target-backup-key',
+                                    str(s.key_path(backup)), '--apply', '--confirm-restore-previous-state')
+            if code == 0 and 'rollback=healthy' in lines:
+                record.update(outcome='rolled_back', rollback='healthy')
+            else:
+                record.update(outcome='rollback_failed', rollback='failed_manual_recovery_needed')
+
+        return s.start_ops_job('import_apply', 'backup', work, lock=True)
 
 
 class UpdateRunner:
@@ -719,6 +1073,58 @@ def confirmed(body):
         raise OpsError(400, 'invalid_request')
 
 
+def portable_route(sources, method, path, query, body):
+    """The D5 routes, or None for any other path."""
+    export_match = re.fullmatch(r'/api/v1/backups/([^/]+)/export', path)
+    export_key = re.fullmatch(r'/api/v1/exports/([^/]+)/key(/saved)?', path)
+    export_delete = re.fullmatch(r'/api/v1/exports/([^/]+)/delete', path)
+    import_action = re.fullmatch(r'/api/v1/imports/([^/]+)/(preflight|apply|delete)', path)
+    listing = path in ('/api/v1/exports', '/api/v1/imports')
+    if not (export_match or export_key or export_delete or import_action or listing):
+        return None
+    portable = sources.portable
+    if portable is None:
+        raise OpsError(501, 'not_implemented')
+    if listing:
+        if method != 'GET':
+            raise OpsError(405, 'method_not_allowed')
+        cursor = None
+        if query:
+            if len(query) != 1 or query[0][0] != 'cursor' or not CURSOR.fullmatch(query[0][1]):
+                raise OpsError(400, 'invalid_query')
+            cursor = query[0][1]
+        items = portable.exports_list() if path == '/api/v1/exports' else portable.imports_list()
+        return 200, page(items, cursor)
+    if method != 'POST':
+        raise OpsError(405, 'method_not_allowed')
+    if query:
+        raise OpsError(400, 'invalid_query')
+    if export_match:
+        if not isinstance(body, dict) or set(body) != {'confirm', 'backup_key'} or body['confirm'] is not True or \
+                not (body['backup_key'] is None or (isinstance(body['backup_key'], str) and KEY.fullmatch(body['backup_key']))):
+            raise OpsError(400, 'invalid_request')
+        return 202, portable.start_export(export_match.group(1), body['backup_key'])
+    if export_key or export_delete:
+        confirmed(body)
+        if export_delete:
+            return 200, portable.delete_export(export_delete.group(1))
+        public = export_key.group(1)
+        return 200, portable.forget_export_key(public) if export_key.group(2) else portable.reveal_export_key(public)
+    public, action = import_action.group(1), import_action.group(2)
+    if action == 'delete':
+        confirmed(body)
+        return 200, portable.delete_import(public)
+    fields = {'key', 'mode'} if action == 'preflight' else {'key', 'mode', 'replace', 'source_stopped', 'confirm'}
+    if not isinstance(body, dict) or set(body) != fields or not isinstance(body['key'], str) or \
+            not KEY.fullmatch(body['key']) or body['mode'] not in IMPORT_MODES:
+        raise OpsError(400, 'invalid_request')
+    if action == 'preflight':
+        return 202, portable.start_preflight(public, body['key'], body['mode'])
+    if body['confirm'] is not True or not isinstance(body['replace'], bool) or not isinstance(body['source_stopped'], bool):
+        raise OpsError(400, 'invalid_request')
+    return 202, portable.start_apply(public, body['key'], body['mode'], body['replace'], body['source_stopped'])
+
+
 def handle(sources, method, target, body=None):
     """Return (status, body) for one request; raises OpsError for refusals."""
     if not isinstance(target, str) or len(target) > 512 or not target.startswith('/'):
@@ -726,6 +1132,9 @@ def handle(sources, method, target, body=None):
     parts = urlsplit(target)
     query = parse_qsl(parts.query, keep_blank_values=True)
     path = parts.path
+    portable = portable_route(sources, method, path, query, body)
+    if portable is not None:
+        return portable
     key_match = re.fullmatch(r'/api/v1/backups/([^/]+)/key(/saved)?', path)
     delete_match = re.fullmatch(r'/api/v1/backups/([^/]+)/delete', path)
     if delete_match:
@@ -755,7 +1164,7 @@ def handle(sources, method, target, body=None):
             raise OpsError(400, 'invalid_request')
         return 202, UpdateRunner(sources).start(body['release_revision'])
     if name is None and not job_match:
-        if path.startswith('/api/v1/backups/') or path == '/api/v1/imports/preflight':
+        if path.startswith('/api/v1/backups/'):
             raise OpsError(501, 'not_implemented')
         raise OpsError(404, 'not_found')
     if name == 'backups' and method == 'POST':
@@ -812,9 +1221,47 @@ def make_handler(sources):
             self.end_headers()
             self.wfile.write(payload)
 
+        def stream_routes(self):
+            """Upload (POST /api/v1/imports) and download (GET /api/v1/exports/{id}/download) stream raw bytes."""
+            path = urlsplit(self.path).path
+            download = re.fullmatch(r'/api/v1/exports/([^/]+)/download', path)
+            if download and self.command == 'GET' and not urlsplit(self.path).query:
+                if sources.portable is None:
+                    raise OpsError(501, 'not_implemented')
+                file = sources.portable.resolve_export(download.group(1))
+                size = file.stat().st_size
+                with file.open('rb') as stream:
+                    self.send_response(200)
+                    self.send_header('Cache-Control', 'no-store')
+                    self.send_header('Content-Type', 'application/octet-stream')
+                    self.send_header('Content-Disposition', 'attachment; filename="nanoclaw-export.ncx"')
+                    self.send_header('X-Content-Type-Options', 'nosniff')
+                    self.send_header('Content-Length', str(size))
+                    self.end_headers()
+                    try:
+                        shutil.copyfileobj(stream, self.wfile, CHUNK)
+                    except OSError:
+                        self.close_connection = True  # the client went away mid-download
+                return True
+            if path == '/api/v1/imports' and self.command == 'POST' and not urlsplit(self.path).query:
+                self.close_connection = True  # a refused upload leaves its body unread
+                if sources.portable is None:
+                    raise OpsError(501, 'not_implemented')
+                if self.headers.get('Content-Type') != 'application/octet-stream':
+                    raise OpsError(415, 'unsupported_media_type')
+                try:
+                    length = int(self.headers.get('Content-Length') or 0)
+                except ValueError:
+                    raise OpsError(400, 'invalid_request')
+                self.respond(201, sources.portable.receive(self.rfile, length))
+                return True
+            return False
+
         def dispatch(self):
             request_id = 'req_' + secrets.token_hex(8)
             try:
+                if self.stream_routes():
+                    return
                 length = int(self.headers.get('Content-Length') or 0)
                 if length > MAX_BODY:
                     raise OpsError(413, 'payload_too_large')
@@ -826,6 +1273,8 @@ def make_handler(sources):
                         raise OpsError(400, 'invalid_request')
                 status, body = handle(sources, self.command, self.path, payload)
             except OpsError as error:
+                if error.status == 413 or error.code == 'upload_incomplete':
+                    self.close_connection = True  # the unread body makes the connection unusable
                 status, body = error.status, {'error': {'code': error.code, 'request_id': request_id}}
             except Exception:  # fail closed without detail
                 status, body = 500, {'error': {'code': 'internal_error', 'request_id': request_id}}
@@ -853,7 +1302,8 @@ def serve(args):
     sources = Sources(args.state_root, args.backup_root, args.control_backup_root, args.candidates, key,
                       key_root=args.key_root, project_root=args.project_root, jobs_dir=args.jobs_dir,
                       recovery_script=here / 'compose-recovery.py', update_script=here / 'compose-release-update.py',
-                      update_mode=args.update_mode)
+                      update_mode=args.update_mode, portable_root=args.portable_root,
+                      portable_script=here / 'compose-portable.py')
     if args.jobs_dir:
         os.makedirs(args.jobs_dir, mode=0o700, exist_ok=True)
     sock = Path(args.socket)
@@ -895,6 +1345,8 @@ def main(argv=None):
     s.add_argument('--key-root', default=None, help='backup keys; enables backups from the panel')
     s.add_argument('--project-root', default=None, help='the Compose checkout; enables backups from the panel')
     s.add_argument('--jobs-dir', default=None, help='private directory for job records')
+    s.add_argument('--portable-root', default=None,
+                   help='private directory for exports and imports; enables them in the panel')
     s.add_argument('--update-mode', choices=sorted(UPDATE_MODES), default=None,
                    help='enables updates from the panel; production for real identities, synthetic for test hosts')
     f = sub.add_parser('fetch-candidates')
