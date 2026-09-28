@@ -63,6 +63,19 @@ const HEADERS: Readonly<Record<string, string>> = {
 const RATE_LIMITS: Readonly<Record<RateLimitClass, number>> = { read: 120, mutation: 20, login: 20, probe: 60 };
 
 export type Forward = (method: string, target: string, body: unknown) => Promise<{ status: number; body: unknown }>;
+/**
+ * A raw exchange with the operations service for the D5 file transfers: the
+ * browser's upload is piped as the request body, and the answer comes back as
+ * a stream (the export file, or a small JSON reply).
+ */
+export type StreamForward = (
+  method: string,
+  target: string,
+  upload: { body: NodeJS.ReadableStream; length: number } | null,
+) => Promise<http.IncomingMessage>;
+/** Largest portable file accepted through the panel. */
+export const MAX_UPLOAD_BYTES = 64 * 1024 ** 3;
+const BODY_TIMEOUT_MS = 30_000;
 
 /** Endpoints answered by the root-side operations service, when one is configured. */
 export const OPS_ENDPOINTS = new Set([
@@ -76,8 +89,16 @@ export const OPS_ENDPOINTS = new Set([
   'backup_key_saved',
   'backup_delete',
   'backup_export',
+  'exports',
+  'export_key',
+  'export_key_saved',
+  'export_download',
+  'export_delete',
+  'imports',
+  'import_upload',
   'import_preflight',
   'import_apply',
+  'import_delete',
 ]);
 
 export interface DashboardConfig {
@@ -90,6 +111,8 @@ export interface DashboardConfig {
   forward: Forward;
   /** The operations service; without it, its endpoints stay with `forward` (`not_implemented`). */
   opsForward?: Forward;
+  /** The operations service for file transfers (export download, import upload). */
+  opsStream?: StreamForward;
   now?: () => number;
   scrypt?: ScryptParams;
 }
@@ -108,6 +131,8 @@ interface Reply {
   status: number;
   body: unknown;
   headers?: Record<string, string>;
+  /** A file to stream instead of a JSON body (export download). */
+  stream?: http.IncomingMessage;
 }
 
 const requestId = (): string => `req_${randomBytes(8).toString('hex')}`;
@@ -131,12 +156,19 @@ function readBody(request: http.IncomingMessage): Promise<unknown> {
     }
     const chunks: Buffer[] = [];
     let size = 0;
+    // The server has no global request timeout (uploads may take long); JSON bodies do.
+    const timer = setTimeout(() => {
+      reject(new HttpError(408, 'request_timeout'));
+      request.destroy();
+    }, BODY_TIMEOUT_MS);
+    request.on('close', () => clearTimeout(timer));
     request.on('data', (chunk: Buffer) => {
       size += chunk.length;
       if (size > MAX_BODY_BYTES) reject(new HttpError(413, 'payload_too_large'));
       else chunks.push(chunk);
     });
     request.on('end', () => {
+      clearTimeout(timer);
       if (size === 0) return resolve(undefined);
       if (!/^application\/json(?:;\s*charset=utf-8)?$/i.test(String(request.headers['content-type'] ?? ''))) {
         return reject(new HttpError(415, 'unsupported_media_type'));
@@ -253,6 +285,59 @@ export function createDashboardServer(config: DashboardConfig): http.Server {
     }
   }
 
+  // D5 file transfers: never buffered here, never parsed; only the JSON answers are checked.
+  async function transfer(endpoint: Endpoint, request: http.IncomingMessage, url: URL): Promise<Reply> {
+    if (!config.opsStream) throw new HttpError(503, 'ops_unavailable');
+    let upload: { body: NodeJS.ReadableStream; length: number } | null = null;
+    if (endpoint.stream === 'upload') {
+      if (request.headers['content-type'] !== 'application/octet-stream') {
+        throw new HttpError(415, 'unsupported_media_type');
+      }
+      const length = Number(request.headers['content-length']);
+      if (!Number.isSafeInteger(length) || length <= 0) throw new HttpError(411, 'length_required');
+      if (length > MAX_UPLOAD_BYTES) throw new HttpError(413, 'payload_too_large');
+      upload = { body: request, length };
+    }
+    const upstream = await config.opsStream(request.method ?? 'GET', url.pathname, upload).catch(() => {
+      throw new HttpError(503, 'ops_unavailable');
+    });
+    const status = upstream.statusCode ?? 502;
+    const length = Number(upstream.headers['content-length']);
+    if (endpoint.stream === 'download' && status === 200) {
+      if (upstream.headers['content-type'] !== 'application/octet-stream' || !Number.isSafeInteger(length)) {
+        upstream.destroy();
+        throw new HttpError(502, 'upstream_invalid');
+      }
+      return {
+        status: 200,
+        body: undefined,
+        stream: upstream,
+        headers: {
+          'content-type': 'application/octet-stream',
+          'content-disposition': 'attachment; filename="nanoclaw-export.ncx"',
+          'content-length': String(length),
+        },
+      };
+    }
+    // Everything else is a small JSON answer, checked like any other.
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of upstream) {
+      size += (chunk as Buffer).length;
+      if (size > 64 * 1024) throw new HttpError(502, 'upstream_invalid');
+      chunks.push(chunk as Buffer);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    } catch {
+      throw new HttpError(502, 'upstream_invalid');
+    }
+    const schema = status < 300 ? endpoint.response : errorResponse;
+    if (schema === null || validate(schema, parsed).length) throw new HttpError(502, 'upstream_invalid');
+    return { status, body: parsed };
+  }
+
   // Jobs live in two places: the operations service (backups, updates) and
   // the host (the model change). Ask the first, then the other.
   async function forwardJob(target: string): Promise<{ status: number; body: unknown }> {
@@ -310,6 +395,8 @@ export function createDashboardServer(config: DashboardConfig): http.Server {
     }
     limit(session ? session.csrf : 'anonymous', policy.rateLimit);
 
+    if (endpoint.stream) return { reply: await transfer(endpoint, request, url), endpoint };
+
     const body = await readBody(request);
     if (endpoint.request === null ? body !== undefined : validate(endpoint.request, body).length) {
       if (endpoint.name !== 'import_preflight') throw new HttpError(400, 'invalid_request');
@@ -357,6 +444,13 @@ export function createDashboardServer(config: DashboardConfig): http.Server {
     }
     const id = requestId();
     const send = (reply: Reply, endpoint: Endpoint | null): void => {
+      if (reply.stream) {
+        response.writeHead(reply.status, { ...baseHeaders, ...(reply.headers ?? {}) });
+        reply.stream.pipe(response);
+        reply.stream.on('error', () => response.destroy());
+        response.on('close', () => reply.stream!.destroy());
+        return;
+      }
       const payload = reply.status === 204 || reply.body === undefined ? '' : JSON.stringify(reply.body);
       // A cut-off upload leaves the connection unusable: say so, so clients do not reuse it.
       const close = reply.status === 413 ? { connection: 'close' } : {};
@@ -409,6 +503,29 @@ const UI_ASSETS: Readonly<Record<string, { type: string; body: string }>> = {
 /** The static UI files; no query strings, no other paths. */
 function uiAsset(url: string | undefined): { type: string; body: string } | null {
   return Object.hasOwn(UI_ASSETS, url ?? '') ? UI_ASSETS[url!] : null;
+}
+
+/** Raw exchange with the operations service over its Unix socket (no overall deadline; 2-minute idle limit). */
+export function socketStream(socketPath: string, idleMs = 120_000): StreamForward {
+  return (method, target, upload) =>
+    new Promise((resolve, reject) => {
+      const request = http.request(
+        {
+          socketPath,
+          method,
+          path: target,
+          timeout: idleMs,
+          headers: upload
+            ? { 'content-type': 'application/octet-stream', 'content-length': String(upload.length) }
+            : {},
+        },
+        resolve,
+      );
+      request.on('timeout', () => request.destroy(new Error('idle')));
+      request.on('error', reject);
+      if (upload) upload.body.pipe(request);
+      else request.end();
+    });
 }
 
 /** Forward to the host boundary over its Unix socket. */

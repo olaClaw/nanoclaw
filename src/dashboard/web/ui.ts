@@ -67,6 +67,7 @@ export const INDEX_HTML = `<!doctype html>
           <button type="button" data-view="sessions">Sessioni</button>
           <button type="button" data-view="model">Modello e provider</button>
           <button type="button" data-view="backups">Backup</button>
+          <button type="button" data-view="transfer">Esporta e importa</button>
           <button type="button" data-view="updates">Aggiornamenti</button>
         </nav>
         <p class="aside-note">Dal pannello puoi creare backup, installare aggiornamenti, riavviare gli agenti e cambiare il modello.</p>
@@ -134,6 +135,8 @@ p { margin: 0 0 12px; }
 .primary, .secondary { border-radius: 9px; padding: 9px 13px; font-weight: 680; }
 .primary { background: var(--brand); color: #fff; border: 1px solid var(--brand); }
 .secondary { background: #fff; color: var(--brand); border: 1px solid #a6c9b3; }
+a.button { display: inline-block; text-decoration: none; line-height: 1.5; }
+a.button:focus-visible { outline: 3px solid #a8d6b8; outline-offset: 2px; }
 .message { min-height: 1.5em; color: var(--brand-dark); font-size: .92rem; }
 .message.error { color: var(--danger); }
 dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 0; }
@@ -171,7 +174,7 @@ export const APP_JS = String.raw`'use strict';
 
   const TITLES = {
     overview: 'Panoramica', agents: 'Agenti', channels: 'Canali', sessions: 'Sessioni',
-    model: 'Modello e provider', backups: 'Backup', updates: 'Aggiornamenti',
+    model: 'Modello e provider', backups: 'Backup', transfer: 'Esporta e importa', updates: 'Aggiornamenti',
   };
   const ERRORS = {
     invalid_credentials: 'Password errata.',
@@ -192,6 +195,18 @@ export const APP_JS = String.raw`'use strict';
     backup_too_old_for_schema_change: 'Il backup è troppo vecchio per una release che cambia il database.',
     restore_space_insufficient: 'Spazio disco insufficiente per un eventuale ripristino dei dati.',
     restore_state_mount_unsupported: 'Lo stato è su un disco separato: il ripristino automatico dei dati non è possibile.',
+    backup_key_required: 'La chiave di questo backup non è più sul server: inseriscila.',
+    portable_storage_unavailable: 'Le cartelle di export/import non sono pronte sul server.',
+    import_space_insufficient: 'Spazio disco insufficiente per questo file.',
+    unsupported_media_type: 'Tipo di file non accettato.',
+    length_required: 'Il file è vuoto.',
+    payload_too_large: 'Il file è troppo grande.',
+    bundle_authentication_failed: 'Chiave sbagliata o file alterato.',
+    bundle_release_newer_than_target: 'Il pacchetto viene da una release più recente: aggiorna prima questa istanza.',
+    bundle_schema_newer_than_target: 'Il pacchetto ha un database più recente di questa istanza: aggiornala prima.',
+    migration_identity_missing: 'Il pacchetto non contiene identità di canale da migrare.',
+    source_stopped_confirmation_required: 'Per una migrazione conferma di aver fermato l\'istanza di origine.',
+    replace_confirmation_required: 'Questa istanza ha già dei dati: conferma la sostituzione.',
     preflight_expired: 'Verifica scaduta: ripetila.',
     preflight_stale: 'Gli agenti sono cambiati dopo la verifica: ripetila.',
     preflight_not_ready: 'La verifica non è riuscita: correggi e ripeti.',
@@ -538,6 +553,7 @@ export const APP_JS = String.raw`'use strict';
     switch_release: 'cambio di release', start_services: 'avvio dei servizi', wait_channels: 'attesa dei canali',
     refresh_images: 'aggiornamento immagini', refresh_dashboard: 'aggiornamento dashboard', rollback: 'ripristino',
     restore_state: 'ripristino dei dati dal backup',
+    export: 'preparazione del pacchetto', import: 'import', backup: 'backup cifrato di questa istanza',
     snapshot: 'copia della configurazione attuale', write_settings: 'salvataggio delle impostazioni',
     update_agents: 'aggiornamento degli agenti', restart_agents: 'riavvio degli agenti', verify: 'verifica', done: 'fine',
   };
@@ -600,14 +616,17 @@ export const APP_JS = String.raw`'use strict';
     input.focus();
   }
 
-  function showKey(target, backup, key) {
+  function showKey(target, backup, key, kind) {
+    const exported = kind === 'export';
     const code = el('code', { class: 'secret' }, key);
     const saved = el('input', { type: 'checkbox', id: 'key-saved' });
     const confirmButton = el('button', { class: 'primary', type: 'button', disabled: '' }, 'Cancella la chiave dal server');
     saved.addEventListener('change', () => { confirmButton.disabled = !saved.checked; });
     const box = el('article', { class: 'card wide key-card' },
-      el('h2', {}, 'Chiave del backup: salvala ora'),
-      el('p', {}, 'Questa chiave serve per ripristinare il backup. Salvala nel password manager: dopo la conferma viene cancellata dal server e il pannello non potrà mostrarla di nuovo.'),
+      el('h2', {}, exported ? 'Chiave dell\'export: salvala ora' : 'Chiave del backup: salvala ora'),
+      el('p', {}, exported
+        ? 'Questa chiave serve per importare il pacchetto su un\'altra istanza e non è dentro il file. Salvala nel password manager, separata dal file: dopo la conferma viene cancellata dal server e il pannello non potrà mostrarla di nuovo.'
+        : 'Questa chiave serve per ripristinare il backup. Salvala nel password manager: dopo la conferma viene cancellata dal server e il pannello non potrà mostrarla di nuovo.'),
       code,
       el('div', { class: 'actions' },
         el('button', { class: 'secondary', type: 'button', onclick: async () => {
@@ -616,11 +635,11 @@ export const APP_JS = String.raw`'use strict';
       el('label', { class: 'choice' }, saved, el('span', {}, 'Ho salvato la chiave nel password manager')),
       el('div', { class: 'actions' }, confirmButton));
     confirmButton.addEventListener('click', async () => {
-      const result = await api('POST', '/backups/' + encodeURIComponent(backup) + '/key/saved', { confirm: true });
+      const result = await api('POST', (exported ? '/exports/' : '/backups/') + encodeURIComponent(backup) + '/key/saved', { confirm: true });
       if (result.status !== 200) { say(ERRORS[result.code] || 'Conferma non riuscita.', true); return; }
       code.textContent = '';
       box.remove();
-      await render('backups');
+      await render(exported ? 'transfer' : 'backups');
       say('Chiave cancellata dal server.');
     });
     target.prepend(box);
@@ -730,6 +749,242 @@ export const APP_JS = String.raw`'use strict';
     say('Backup eliminato.');
   }
 
+  // ── Export and import (D5) ──
+
+  async function waitJob(id, onPhase) {
+    for (let misses = 0; misses < 200;) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      const job = await api('GET', '/jobs/' + encodeURIComponent(id));
+      if (job.status === 401) return null;
+      if (job.status !== 200) { misses += 1; continue; }
+      if (onPhase) onPhase(job.data);
+      if (job.data.outcome !== 'running') return job.data;
+    }
+    return null;
+  }
+
+  function hexKeyInput() {
+    return el('input', { type: 'password', autocomplete: 'off', spellcheck: 'false', required: '', minlength: '64', maxlength: '64', pattern: '[0-9a-fA-F]{64}' });
+  }
+
+  function confirmExport(view, item) {
+    const keyInput = item.key_on_host ? null : hexKeyInput();
+    const box = el('form', { class: 'card wide key-card inline-form' },
+      el('h2', {}, 'Esportare il backup del ' + when(item.created_at) + '?'),
+      el('p', {}, 'Il pacchetto contiene tutto ciò che serve per spostare NanoClaw su un\'altra macchina: dati, agenti, stato di Signal, gateway con le sue credenziali, configurazioni dei canali. Non contiene proxy, certificati né la password di questo pannello.'),
+      el('p', {}, 'Viene cifrato con una chiave nuova, mostrata una sola volta: il file da solo non basta per aprirlo.'),
+      keyInput ? el('label', { class: 'field' }, 'Chiave di questo backup (dal password manager)', keyInput) : null,
+      el('div', { class: 'actions' },
+        el('button', { class: 'primary', type: 'submit' }, 'Esporta'),
+        el('button', { class: 'secondary', type: 'button', onclick: () => box.remove() }, 'Annulla')));
+    box.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const typed = keyInput ? keyInput.value.trim().toLowerCase() : null;
+      if (keyInput) keyInput.value = '';
+      box.remove();
+      startExport(view, item, typed);
+    });
+    view.prepend(box);
+    if (keyInput) keyInput.focus();
+  }
+
+  async function startExport(view, item, typed) {
+    const result = await api('POST', '/backups/' + encodeURIComponent(item.id) + '/export', { confirm: true, backup_key: typed });
+    if (result.status === 403 && result.code === 'reauth_required') {
+      askPassword(view, 'Per esportare inserisci di nuovo la password.', () => startExport(view, item, typed));
+      return;
+    }
+    if (result.status !== 202 && result.status !== 200) { say(ERRORS[result.code] || 'Export non avviato.', true); return; }
+    const progress = el('article', { class: 'card wide' }, el('h2', {}, 'Export in corso'),
+      el('p', { class: 'muted' }, 'Il backup viene decifrato e cifrato di nuovo con una chiave nuova. I servizi non si fermano.'));
+    view.prepend(progress);
+    const job = await waitJob(result.data.job.id);
+    progress.remove();
+    if (!job || job.outcome !== 'succeeded') {
+      say('Export non riuscito: ' + ((job && job.failure_category) ? (ERRORS[job.failure_category] || job.failure_category.replaceAll('_', ' ')) : 'errore') + '.', true);
+      return;
+    }
+    await render('transfer');
+    const list = await api('GET', '/exports');
+    const fresh = list.status === 200 ? list.data.items.find((e) => e.key_on_host) : null;
+    say('Pacchetto pronto.');
+    if (fresh) await revealExportKey($('view'), fresh.id);
+  }
+
+  async function revealExportKey(target, id) {
+    const result = await api('POST', '/exports/' + encodeURIComponent(id) + '/key', { confirm: true });
+    if (result.status === 403 && result.code === 'reauth_required') {
+      askPassword(target, 'Per mostrare la chiave inserisci di nuovo la password.', () => revealExportKey(target, id));
+      return;
+    }
+    if (result.status !== 200) { say(ERRORS[result.code] || 'Chiave non disponibile.', true); return; }
+    showKey(target, result.data.export, result.data.key, 'export');
+  }
+
+  async function deleteTransfer(view, kind, id) {
+    const result = await api('POST', '/' + kind + '/' + encodeURIComponent(id) + '/delete', { confirm: true });
+    if (result.status === 403 && result.code === 'reauth_required') {
+      askPassword(view, 'Per eliminare il file inserisci di nuovo la password.', () => deleteTransfer(view, kind, id));
+      return;
+    }
+    if (result.status !== 200) { say(ERRORS[result.code] || 'Eliminazione non riuscita.', true); return; }
+    await render('transfer');
+    say('File eliminato.');
+  }
+
+  function uploadFile(file, onProgress) {
+    return new Promise((resolve) => {
+      const request = new XMLHttpRequest();
+      request.open('POST', '/api/v1/imports');
+      request.setRequestHeader('content-type', 'application/octet-stream');
+      request.setRequestHeader('x-csrf-token', csrf);
+      request.upload.onprogress = (event) => { if (event.lengthComputable) onProgress(event.loaded / event.total); };
+      request.onload = () => {
+        let data = null;
+        try { data = JSON.parse(request.responseText); } catch { data = null; }
+        resolve({ status: request.status, data, code: data && data.error ? data.error.code : null });
+      };
+      request.onerror = () => resolve({ status: 0, data: null, code: 'upstream_unavailable' });
+      request.send(file);
+    });
+  }
+
+  async function startUpload(view, input, note) {
+    const file = input.files && input.files[0];
+    if (!file) { say('Scegli un file .ncx.', true); return; }
+    note.textContent = 'Caricamento: 0%';
+    const result = await uploadFile(file, (share) => { note.textContent = 'Caricamento: ' + Math.floor(share * 100) + '%'; });
+    if (result.status === 403 && result.code === 'reauth_required') {
+      note.textContent = '';
+      askPassword(view, 'Per caricare il file inserisci di nuovo la password.', () => startUpload(view, input, note));
+      return;
+    }
+    if (result.status !== 201) { note.textContent = ''; say(ERRORS[result.code] || 'Caricamento non riuscito.', true); return; }
+    await render('transfer');
+    say('File caricato: ora verificalo con la sua chiave.');
+  }
+
+  const CHECK_TEXT = (check) => check
+    ? 'Verificato per ' + (check.mode === 'migration' ? 'migrazione' : 'copia di prova') + ' il ' + when(check.checked_at) +
+      (check.target === 'populated' ? ': questa istanza ha già dei dati' : ': questa istanza è vuota') +
+      (check.release === 'older' ? '; dati da una release precedente, aggiornati all\'avvio' : '')
+    : 'Non ancora verificato';
+
+  function importForm(view, item, apply, remembered) {
+    const key = hexKeyInput();
+    if (remembered) key.value = remembered;
+    const rehearsal = el('input', { type: 'radio', name: 'import-mode', value: 'rehearsal' });
+    const migration = el('input', { type: 'radio', name: 'import-mode', value: 'migration' });
+    ((item.check && item.check.mode === 'migration') ? migration : rehearsal).checked = true;
+    const replace = el('input', { type: 'checkbox' });
+    const stopped = el('input', { type: 'checkbox' });
+    const populated = item.check && item.check.target === 'populated';
+    const stoppedRow = el('label', { class: 'choice' }, stopped, el('span', {}, 'Ho fermato definitivamente l\'istanza di origine: non deve più ricevere né rispondere'));
+    const warning = el('p', { class: 'message error' }, 'Migrazione: questa istanza prenderà i numeri e i bot dell\'origine. Due istanze con le stesse identità rispondono due volte e possono rompere Signal.');
+    const sync = () => { const m = migration.checked; stoppedRow.hidden = !apply || !m; warning.hidden = !m; };
+    rehearsal.addEventListener('change', sync);
+    migration.addEventListener('change', sync);
+    const form = el('form', { class: 'card wide inline-form' },
+      el('h2', {}, apply ? 'Applicare l\'import?' : 'Verificare il file'),
+      el('label', { class: 'field' }, 'Chiave dell\'export (dal password manager)', key),
+      el('label', { class: 'choice' }, rehearsal, el('span', {}, 'Copia di prova: canali spenti, identità non copiate, attività pianificate in pausa')),
+      el('label', { class: 'choice' }, migration, el('span', {}, 'Migrazione definitiva: canali, identità e attività come sull\'origine')),
+      warning,
+      apply ? el('p', {}, 'Prima dell\'import viene fatto un backup cifrato di questa istanza; se l\'import non riesce, viene ripristinata da sola. I servizi si fermano per qualche minuto; questo pannello resta attivo.') : null,
+      apply && populated ? el('label', { class: 'choice' }, replace, el('span', {}, 'Sostituisci i dati attuali di questa istanza')) : null,
+      apply ? stoppedRow : null,
+      el('div', { class: 'actions' },
+        el('button', { class: 'primary', type: 'submit' }, apply ? 'Applica' : 'Verifica'),
+        el('button', { class: 'secondary', type: 'button', onclick: () => { key.value = ''; form.remove(); } }, 'Annulla')));
+    sync();
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const value = key.value.trim().toLowerCase();
+      const mode = migration.checked ? 'migration' : 'rehearsal';
+      if (apply && populated && !replace.checked) { say(ERRORS.replace_confirmation_required, true); return; }
+      if (apply && mode === 'migration' && !stopped.checked) { say(ERRORS.source_stopped_confirmation_required, true); return; }
+      key.value = '';
+      form.remove();
+      if (apply) runImport(view, item, { key: value, mode, replace: replace.checked, source_stopped: stopped.checked, confirm: true });
+      else checkImport(view, item, { key: value, mode });
+    });
+    view.prepend(form);
+    key.focus();
+  }
+
+  async function checkImport(view, item, body) {
+    const result = await api('POST', '/imports/' + encodeURIComponent(item.id) + '/preflight', body);
+    if (result.status === 403 && result.code === 'reauth_required') {
+      askPassword(view, 'Per verificare il file inserisci di nuovo la password.', () => checkImport(view, item, body));
+      return;
+    }
+    if (result.status !== 202 && result.status !== 200) { say(ERRORS[result.code] || 'Verifica non avviata.', true); return; }
+    const progress = el('article', { class: 'card wide' }, el('h2', {}, 'Verifica in corso'),
+      el('p', { class: 'muted' }, 'Il file viene decifrato in un\'area riservata e controllato; questa istanza non cambia.'));
+    view.prepend(progress);
+    const job = await waitJob(result.data.job.id);
+    progress.remove();
+    if (!job || job.outcome !== 'succeeded') {
+      say('Verifica non riuscita: ' + ((job && job.failure_category) ? (ERRORS[job.failure_category] || job.failure_category.replaceAll('_', ' ')) : 'errore') + '.', true);
+      return;
+    }
+    await render('transfer');
+    const list = await api('GET', '/imports');
+    const fresh = list.status === 200 ? list.data.items.find((i) => i.id === item.id) : null;
+    say('File verificato. ' + (fresh ? CHECK_TEXT(fresh.check) + '.' : ''));
+    // The key stays in this page's memory only, for the next step.
+    if (fresh) importForm($('view'), fresh, true, body.key);
+  }
+
+  async function runImport(view, item, body) {
+    const result = await api('POST', '/imports/' + encodeURIComponent(item.id) + '/apply', body);
+    if (result.status === 403 && result.code === 'reauth_required') {
+      askPassword(view, 'Per applicare l\'import inserisci di nuovo la password.', () => runImport(view, item, body));
+      return;
+    }
+    if (result.status !== 202 && result.status !== 200) { say(ERRORS[result.code] || 'Import non avviato.', true); return; }
+    const progress = el('article', { class: 'card wide' }, el('h2', {}, 'Import in corso'), el('p', { class: 'muted' }, 'Avvio…'));
+    view.prepend(progress);
+    const job = await waitJob(result.data.job.id, (j) => { progress.lastChild.textContent = 'Fase: ' + (PHASES[j.phase] || j.phase); });
+    progress.remove();
+    await render('transfer');
+    if (!job) { say('Esito dell\'import non disponibile: controlla il server.', true); return; }
+    if (job.outcome === 'succeeded') say(body.mode === 'migration' ? 'Migrazione completata.' : 'Copia di prova importata: canali spenti, attività in pausa.');
+    else if (job.outcome === 'rolled_back') say('Import non riuscito (' + (ERRORS[job.failure_category] || (job.failure_category || 'errore').replaceAll('_', ' ')) + '): questa istanza è stata ripristinata.', true);
+    else say('Import non riuscito' + (job.rollback === 'failed_manual_recovery_needed' ? ' e ripristino da completare da terminale.' : '.'), true);
+    if (job.backup) await revealKey($('view'), job.backup);
+  }
+
+  async function renderTransfer(view) {
+    const [exports, imports] = await Promise.all([api('GET', '/exports'), api('GET', '/imports')]);
+    if (exports.status !== 200) return fail(view, exports);
+    if (imports.status !== 200) return fail(view, imports);
+    view.append(wide('Pacchetti esportati', exports.data.items.length ? exports.data.items.map((item) => row(
+      'Export del ' + when(item.created_at),
+      'Release ' + item.release_revision.slice(0, 8) + ' · ' + size(item.size_bytes) + (item.key_on_host ? ' · chiave ancora sul server' : ''),
+      el('div', { class: 'row-actions' },
+        el('a', { class: 'button secondary', href: '/api/v1/exports/' + encodeURIComponent(item.id) + '/download', download: 'nanoclaw-export.ncx' }, 'Scarica'),
+        item.key_on_host ? el('button', { class: 'secondary', type: 'button', onclick: () => revealExportKey(view, item.id) }, 'Mostra chiave') : null,
+        el('button', { class: 'danger', type: 'button', onclick: () => deleteTransfer(view, 'exports', item.id) }, 'Elimina')),
+    )) : el('p', { class: 'muted' }, 'Nessun pacchetto. Per crearne uno scegli un backup nella schermata Backup e premi Esporta.'),
+    el('p', { class: 'muted' }, 'Puoi scaricare il file dal browser oppure copiarlo con SFTP dalla cartella /var/lib/nanoclaw-ops/portable/exports del server.')));
+    const input = el('input', { type: 'file', accept: '.ncx' });
+    const note = el('p', { class: 'muted' });
+    view.append(wide('Importa da un\'altra istanza',
+      el('p', {}, 'Carica il file .ncx esportato dall\'altra istanza, oppure copialo con SFTP nella cartella /var/lib/nanoclaw-ops/portable/imports di questo server: comparirà qui sotto.'),
+      el('div', { class: 'actions' }, input,
+        el('button', { class: 'primary', type: 'button', onclick: () => startUpload(view, input, note) }, 'Carica')),
+      note,
+      imports.data.items.length ? imports.data.items.map((item) => row(
+        'File del ' + when(item.received_at),
+        (item.origin === 'upload' ? 'Caricato dal pannello' : 'Dalla cartella di import') + ' · ' + size(item.size_bytes) + ' · ' + CHECK_TEXT(item.check),
+        el('div', { class: 'row-actions' },
+          el('button', { class: 'secondary', type: 'button', onclick: () => importForm(view, item, false) }, 'Verifica'),
+          item.check ? el('button', { class: 'primary', type: 'button', onclick: () => importForm(view, item, true) }, 'Applica') : null,
+          el('button', { class: 'danger', type: 'button', onclick: () => deleteTransfer(view, 'imports', item.id) }, 'Elimina')),
+      )) : el('p', { class: 'muted' }, 'Nessun file da importare.')));
+  }
+
   async function renderBackups(view, cursor) {
     const result = await api('GET', '/backups' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : ''));
     if (result.status !== 200) return fail(view, result);
@@ -745,6 +1000,9 @@ export const APP_JS = String.raw`'use strict';
         item.key_on_host
           ? el('button', { class: 'secondary', type: 'button', onclick: () => revealKey(view, item.id) }, 'Mostra chiave')
           : status(item.verification),
+        item.exportable
+          ? el('button', { class: 'secondary', type: 'button', onclick: () => confirmExport(view, item) }, 'Esporta')
+          : null,
         b.items.length > 1 || cursor
           ? el('button', { class: 'danger', type: 'button', onclick: () => confirmDelete(view, item) }, 'Elimina')
           : null),
@@ -772,7 +1030,7 @@ export const APP_JS = String.raw`'use strict';
     view.replaceChildren();
     const renderers = {
       overview: renderOverview, agents: renderAgents, channels: renderChannels, sessions: renderSessions, model: renderModel,
-      backups: renderBackups, updates: renderUpdates,
+      backups: renderBackups, transfer: renderTransfer, updates: renderUpdates,
     };
     await renderers[name](view);
   }

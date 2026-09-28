@@ -157,6 +157,7 @@ class HttpsSetupTests(unittest.TestCase):
         host = self.proxy.hosts[0]
         self.assertEqual((host['forward_host'], host['forward_port'], host['certificate_id']), ('dashboard', 8080, 1))
         self.assertTrue(host['ssl_forced'] and host['http2_support'] and host['hsts_enabled'])
+        self.assertIn('client_max_body_size 0;', host['advanced_config'])
         self.assertNotIn(TOKEN, output)
         self.assertEqual(output.count(self.proxy.users[0]['auth']['secret']), 1)
         self.assertIn('https=ok', output)

@@ -175,6 +175,36 @@ export const EXAMPLES: Readonly<Record<string, unknown>> = {
   backup_delete: { backup: 'bkp_0f1e2d3c4b5a69788796a5b4c3d2e1f0', deleted: true },
   backup_key_saved: { backup: 'bkp_0f1e2d3c4b5a69788796a5b4c3d2e1f0', key_on_host: false },
   backup_export: accepted('backup_export'),
+  exports: {
+    items: [
+      {
+        id: 'exp_1a2b3c4d5e6f708192a3b4c5d6e7f809',
+        created_at: '2026-01-15T11:52:10Z',
+        release_revision: REVISION_OLD,
+        size_bytes: 4_912_003_072,
+        key_on_host: true,
+      },
+    ],
+    next_cursor: null,
+  },
+  export_key: { export: 'exp_1a2b3c4d5e6f708192a3b4c5d6e7f809', key: 'fedcba9876543210'.repeat(4) },
+  export_key_saved: { export: 'exp_1a2b3c4d5e6f708192a3b4c5d6e7f809', key_on_host: false },
+  export_download: null,
+  export_delete: { export: 'exp_1a2b3c4d5e6f708192a3b4c5d6e7f809', deleted: true },
+  imports: {
+    items: [
+      {
+        id: 'imp_9f8e7d6c5b4a39281706f5e4d3c2b1a0',
+        received_at: '2026-01-15T12:05:00Z',
+        size_bytes: 4_912_003_072,
+        origin: 'folder',
+        check: { mode: 'rehearsal', target: 'empty', release: 'same', checked_at: '2026-01-15T12:09:31Z' },
+      },
+    ],
+    next_cursor: null,
+  },
+  import_upload: { import: 'imp_9f8e7d6c5b4a39281706f5e4d3c2b1a0' },
   import_preflight: accepted('import_preflight'),
   import_apply: accepted('import_apply'),
+  import_delete: { import: 'imp_9f8e7d6c5b4a39281706f5e4d3c2b1a0', deleted: true },
 };

@@ -12,7 +12,7 @@
  * published on loopback only, except with the plain-HTTP opt-in, where the
  * browser reaches it directly on one LAN/VPN address, unencrypted.
  */
-import { createDashboardServer, socketForward } from './server.js';
+import { createDashboardServer, socketForward, socketStream } from './server.js';
 import { DashboardState } from './state.js';
 
 function required(name: string): string {
@@ -53,9 +53,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     insecureHttp: config.insecureHttp,
     forward: socketForward(config.socket),
     opsForward: config.opsSocket ? socketForward(config.opsSocket) : undefined,
+    opsStream: config.opsSocket ? socketStream(config.opsSocket) : undefined,
   });
-  server.requestTimeout = 30_000;
+  // No overall request deadline: export files take long to upload. JSON bodies
+  // have their own 30-second limit, headers 15 seconds, idle sockets 2 minutes.
+  server.requestTimeout = 0;
   server.headersTimeout = 15_000;
+  server.timeout = 120_000;
   server.listen(config.port, () =>
     process.stdout.write(
       config.insecureHttp ? 'dashboard listening (plain HTTP: unencrypted)\n' : 'dashboard listening\n',

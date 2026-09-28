@@ -30,7 +30,7 @@ import { EXPECTED, SYNTHETIC, seedSyntheticInstall } from '../fixtures/synthetic
 const FORBIDDEN_FIELD =
   /(?:^|_)(?:platform|phone|email|folder|path|url|host|ip|address|token|secret|password|key|thread|display|sender|text|content|message|history|prompt|env|mount_path|headers|image_tag)(?:_|$)/;
 /** Input-only request fields: they never appear in a response (checked below). */
-const INPUT_FIELDS = new Set(['$.password', '$.value', '$.endpoint']);
+const INPUT_FIELDS = new Set(['$.password', '$.value', '$.endpoint', '$.key', '$.backup_key']);
 /** The CSRF token is the session's own anti-forgery value, not a runtime secret. */
 const RESPONSE_FIELDS = new Set([
   '$.csrf_token',
@@ -39,7 +39,8 @@ const RESPONSE_FIELDS = new Set([
   '$.key_on_host',
 ]);
 /** The backup key is shown once by operator decision; only `backup_key` may carry it. */
-const SECRET_RESPONSE = { endpoint: 'backup_key', path: '$.key' };
+/** The one-time key reveals: a backup's, and a portable export's. */
+const SECRET_RESPONSES = new Set(['backup_key $.key', 'export_key $.key']);
 
 describe('schema language', () => {
   const sample = object({
@@ -92,7 +93,9 @@ describe('dashboard API contract', () => {
   it('gives GET and DELETE no request body, and every other method one (except streamed uploads)', () => {
     for (const endpoint of ENDPOINTS) {
       if (endpoint.method !== 'POST') expect(endpoint.request, endpoint.name).toBeNull();
-      else if (endpoint.name !== 'import_preflight') expect(endpoint.request, endpoint.name).not.toBeNull();
+      else if (endpoint.stream !== 'upload') expect(endpoint.request, endpoint.name).not.toBeNull();
+      if (endpoint.stream === 'upload') expect(endpoint.request, endpoint.name).toBeNull();
+      if (endpoint.stream === 'download') expect(endpoint.response, endpoint.name).toBeNull();
     }
   });
 
@@ -106,11 +109,7 @@ describe('dashboard API contract', () => {
           if (
             FORBIDDEN_FIELD.test(field) &&
             !(schema === endpoint.request ? INPUT_FIELDS : RESPONSE_FIELDS).has(path) &&
-            !(
-              schema === endpoint.response &&
-              endpoint.name === SECRET_RESPONSE.endpoint &&
-              path === SECRET_RESPONSE.path
-            )
+            !(schema === endpoint.response && SECRET_RESPONSES.has(`${endpoint.name} ${path}`))
           ) {
             offending.push(`${endpoint.name} ${path}`);
           }

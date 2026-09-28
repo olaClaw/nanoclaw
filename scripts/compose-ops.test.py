@@ -1,13 +1,17 @@
 import http.client
 import importlib.util
+import io
 import json
 import os
 import socket
 import subprocess
+import tarfile
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 MODULE_PATH = Path(__file__).with_name('compose-ops.py')
 SPEC = importlib.util.spec_from_file_location('compose_ops', MODULE_PATH)
@@ -519,6 +523,210 @@ class BackupDeleteTests(BackupOperationTests):
             OPS.handle(self.sources, 'POST', f'/api/v1/backups/{linked_id}/delete', {'confirm': True})
         self.assertEqual(caught.exception.code, 'not_found')
         self.assertTrue((outside / 'precious').exists())
+
+
+FAKE_PORTABLE = """
+import io, json, os, sys, secrets, tarfile
+argv = sys.argv[1:]
+args = {argv[i]: argv[i + 1] for i in range(1, len(argv) - 1) if argv[i].startswith('--') and not argv[i + 1].startswith('--')}
+log = os.environ['FAKE_PORTABLE_LOG']
+with open(log, 'a') as out:
+    out.write(json.dumps({'argv': argv, 'key': open(args.get('--key-file') or args.get('--backup-key') or os.devnull).read().strip() if (args.get('--key-file') or args.get('--backup-key')) else None}) + '\\n')
+if argv[0] == 'export':
+    name = 'aaaaaaaa-20260115T131500Z-' + secrets.token_hex(3)
+    manifest = json.dumps({'revision': 'a' * 40}).encode()
+    path = os.path.join(args['--export-root'], name + '.ncx')
+    with tarfile.open(path, 'w:') as tar:
+        info = tarfile.TarInfo('manifest.json'); info.size = len(manifest); tar.addfile(info, io.BytesIO(manifest))
+        blob = b'x' * 3000; info = tarfile.TarInfo('state.tar.enc'); info.size = len(blob); tar.addfile(info, io.BytesIO(blob))
+    key = os.path.join(args['--key-root'], name + '.key'); open(key, 'w').write(secrets.token_hex(32) + '\\n'); os.chmod(key, 0o600)
+    print('export=created'); print('export_id=' + name); sys.exit(0)
+if '--rollback-txn' in argv:
+    print('rollback=healthy'); sys.exit(0)
+if '--apply' not in argv:
+    print('import_preflight=ok'); print('import_target=populated'); print('import_release=same'); sys.exit(0)
+if os.environ.get('FAKE_IMPORT_FAIL'):
+    print('import_failed_phase=start_stack'); print('import_transaction=20260115T132000Z-abcdef')
+    print('failure_category=imported_stack_unhealthy'); sys.exit(2)
+print('import=healthy')
+"""
+
+
+class PortableOperationTests(BackupOperationTests):
+    def setUp(self):
+        super().setUp()
+        root = self.root
+        self.portable_root = root / 'portable'
+        for name in ('exports', 'export-keys', 'imports', 'work'):
+            (self.portable_root / name).mkdir(parents=True, mode=0o700)
+        os.chmod(self.portable_root, 0o700)
+        script = root / 'compose-portable.py'
+        script.write_text(FAKE_PORTABLE)
+        self.log = root / 'portable.log'
+        os.environ['FAKE_PORTABLE_LOG'] = str(self.log)
+        s = self.sources
+        self.sources = OPS.Sources(s.state_root, s.backup_root, s.control_root, None, KEY, key_root=s.key_root,
+                                   project_root=s.project_root, jobs_dir=s.jobs_dir, recovery_script=s.recovery_script,
+                                   portable_root=self.portable_root, portable_script=script)
+
+    def tearDown(self):
+        for name in ('FAKE_PORTABLE_LOG', 'FAKE_IMPORT_FAIL'):
+            os.environ.pop(name, None)
+        super().tearDown()
+
+    def calls(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def backup(self):
+        job = self.wait(OPS.handle(self.sources, 'POST', '/api/v1/backups', {'confirm': True})[1]['job']['id'])
+        return job['backup']
+
+    def test_export_with_the_key_on_the_server_then_one_time_key_and_delete(self):
+        backup = self.backup()
+        self.assertTrue(OPS.handle(self.sources, 'GET', '/api/v1/backups')[1]['items'][0]['exportable'])
+        status, accepted = OPS.handle(self.sources, 'POST', f'/api/v1/backups/{backup}/export',
+                                      {'confirm': True, 'backup_key': None})
+        self.assertEqual((status, accepted['job']['kind']), (202, 'backup_export'))
+        job = self.wait(accepted['job']['id'])
+        self.assertEqual((job['kind'], job['outcome'], [p['phase'] for p in job['phases']]),
+                         ('backup_export', 'succeeded', ['export', 'done']))
+        [item] = OPS.handle(self.sources, 'GET', '/api/v1/exports')[1]['items']
+        self.assertRegex(item['id'], r'^exp_[0-9a-f]{32}$')
+        self.assertEqual((item['release_revision'], item['key_on_host']), ('a' * 40, True))
+        shown = OPS.handle(self.sources, 'POST', f'/api/v1/exports/{item["id"]}/key', {'confirm': True})[1]
+        self.assertRegex(shown['key'], r'^[0-9a-f]{64}$')
+        OPS.handle(self.sources, 'POST', f'/api/v1/exports/{item["id"]}/key/saved', {'confirm': True})
+        self.assertEqual(list((self.portable_root / 'export-keys').iterdir()), [])
+        with self.assertRaises(OPS.OpsError) as caught:
+            OPS.handle(self.sources, 'POST', f'/api/v1/exports/{item["id"]}/key', {'confirm': True})
+        self.assertEqual(caught.exception.code, 'key_not_on_host')
+        # The backup's own key was used and nothing typed was written anywhere.
+        self.assertEqual(self.calls()[0]['argv'][0], 'export')
+        self.assertEqual(list((self.portable_root / 'work').iterdir()), [])
+        OPS.handle(self.sources, 'POST', f'/api/v1/exports/{item["id"]}/delete', {'confirm': True})
+        self.assertEqual(OPS.handle(self.sources, 'GET', '/api/v1/exports')[1]['items'], [])
+
+    def test_export_after_the_backup_key_was_saved_needs_it_typed_and_forgets_it(self):
+        backup = self.backup()
+        OPS.handle(self.sources, 'POST', f'/api/v1/backups/{backup}/key/saved', {'confirm': True})
+        with self.assertRaises(OPS.OpsError) as caught:
+            OPS.handle(self.sources, 'POST', f'/api/v1/backups/{backup}/export', {'confirm': True, 'backup_key': None})
+        self.assertEqual(caught.exception.code, 'backup_key_required')
+        typed = 'c' * 64
+        job = self.wait(OPS.handle(self.sources, 'POST', f'/api/v1/backups/{backup}/export',
+                                   {'confirm': True, 'backup_key': typed})[1]['job']['id'])
+        self.assertEqual(job['outcome'], 'succeeded')
+        self.assertEqual(self.calls()[-1]['key'], typed)
+        self.assertEqual(list((self.portable_root / 'work').iterdir()), [])
+        for body in ({'confirm': True}, {'confirm': True, 'backup_key': 'short'}, {'confirm': False, 'backup_key': None}):
+            with self.subTest(body=body), self.assertRaises(OPS.OpsError) as caught:
+                OPS.handle(self.sources, 'POST', f'/api/v1/backups/{backup}/export', body)
+            self.assertEqual(caught.exception.code, 'invalid_request')
+
+    def upload(self, blob=b'fixture bundle'):
+        return self.sources.portable.receive(io.BytesIO(blob), len(blob))['import']
+
+    def test_upload_preflight_records_the_check_and_apply_backs_up_first(self):
+        public = self.upload()
+        [item] = OPS.handle(self.sources, 'GET', '/api/v1/imports')[1]['items']
+        self.assertEqual((item['id'], item['origin'], item['check']), (public, 'upload', None))
+        key = 'b' * 64
+        job = self.wait(OPS.handle(self.sources, 'POST', f'/api/v1/imports/{public}/preflight',
+                                   {'key': key, 'mode': 'rehearsal'})[1]['job']['id'])
+        self.assertEqual((job['kind'], job['outcome']), ('import_preflight', 'succeeded'))
+        check = OPS.handle(self.sources, 'GET', '/api/v1/imports')[1]['items'][0]['check']
+        self.assertEqual((check['mode'], check['target'], check['release']), ('rehearsal', 'populated', 'same'))
+        self.assertEqual(self.calls()[-1]['key'], key)
+        self.assertNotIn('--apply', self.calls()[-1]['argv'])
+        job = self.wait(OPS.handle(self.sources, 'POST', f'/api/v1/imports/{public}/apply',
+                                   {'key': key, 'mode': 'rehearsal', 'replace': True, 'source_stopped': False,
+                                    'confirm': True})[1]['job']['id'])
+        self.assertEqual((job['kind'], job['outcome'], job['rollback']), ('import_apply', 'succeeded', 'not_needed'))
+        self.assertEqual([p['phase'] for p in job['phases']], ['backup', 'import', 'done'])
+        self.assertRegex(job['backup'], r'^bkp_[0-9a-f]{32}$')
+        argv = self.calls()[-1]['argv']
+        self.assertIn('--confirm-replace-target-state', argv)
+        self.assertNotIn('--confirm-source-stopped', argv)
+        self.assertIn('--target-backup-dir', argv)
+        self.assertEqual(list((self.portable_root / 'work').iterdir()), [])
+
+    def test_a_failed_import_is_rolled_back_automatically(self):
+        public = self.upload()
+        os.environ['FAKE_IMPORT_FAIL'] = '1'
+        job = self.wait(OPS.handle(self.sources, 'POST', f'/api/v1/imports/{public}/apply',
+                                   {'key': 'b' * 64, 'mode': 'migration', 'replace': False, 'source_stopped': True,
+                                    'confirm': True})[1]['job']['id'])
+        self.assertEqual((job['outcome'], job['rollback'], job['failure_category']),
+                         ('rolled_back', 'healthy', 'imported_stack_unhealthy'))
+        self.assertEqual([p['phase'] for p in job['phases']], ['backup', 'import', 'rollback', 'done'])
+        self.assertIn('--confirm-source-stopped', self.calls()[-2]['argv'])
+        rollback = self.calls()[-1]['argv']
+        self.assertIn(str(self.portable_root / 'work' / '20260115T132000Z-abcdef'), rollback)
+
+    def test_migration_needs_the_source_stopped_and_bodies_are_checked(self):
+        public = self.upload()
+        with self.assertRaises(OPS.OpsError) as caught:
+            OPS.handle(self.sources, 'POST', f'/api/v1/imports/{public}/apply',
+                       {'key': 'b' * 64, 'mode': 'migration', 'replace': True, 'source_stopped': False, 'confirm': True})
+        self.assertEqual(caught.exception.code, 'source_stopped_confirmation_required')
+        for body in ({'key': 'b' * 64, 'mode': 'copy'}, {'key': 'x', 'mode': 'rehearsal'}, {'mode': 'rehearsal'}):
+            with self.subTest(body=body), self.assertRaises(OPS.OpsError) as caught:
+                OPS.handle(self.sources, 'POST', f'/api/v1/imports/{public}/preflight', body)
+            self.assertEqual(caught.exception.code, 'invalid_request')
+        with self.assertRaises(OPS.OpsError) as caught:
+            OPS.handle(self.sources, 'POST', '/api/v1/imports/imp_' + '0' * 32 + '/preflight',
+                       {'key': 'b' * 64, 'mode': 'rehearsal'})
+        self.assertEqual(caught.exception.code, 'not_found')
+        self.assertEqual(self.calls(), [])
+
+    def test_folder_files_are_listed_links_are_not_and_space_is_checked(self):
+        (self.portable_root / 'imports' / 'from-old-host.ncx').write_bytes(b'x')
+        (self.portable_root / 'imports' / 'linked.ncx').symlink_to(self.root / 'portable.log')
+        (self.portable_root / 'imports' / 'notes.txt').write_text('ignored')
+        items = OPS.handle(self.sources, 'GET', '/api/v1/imports')[1]['items']
+        self.assertEqual([item['origin'] for item in items], ['folder'])
+        with patch.object(OPS.shutil, 'disk_usage', return_value=SimpleNamespace(free=10)):
+            with self.assertRaises(OPS.OpsError) as caught:
+                self.upload()
+        self.assertEqual(caught.exception.code, 'import_space_insufficient')
+        with self.assertRaises(OPS.OpsError) as caught:
+            self.sources.portable.receive(io.BytesIO(b'short'), 10)
+        self.assertEqual(caught.exception.code, 'upload_incomplete')
+        self.assertEqual(sorted(p.name for p in (self.portable_root / 'imports').iterdir()),
+                         ['from-old-host.ncx', 'linked.ncx', 'notes.txt'])
+
+    def test_streams_downloads_and_uploads_over_the_socket(self):
+        self.wait(OPS.handle(self.sources, 'POST', f'/api/v1/backups/{self.backup()}/export',
+                             {'confirm': True, 'backup_key': None})[1]['job']['id'])
+        [item] = OPS.handle(self.sources, 'GET', '/api/v1/exports')[1]['items']
+        path = str(self.root / 'ops.sock')
+        server = OPS.UnixServer(path, OPS.make_handler(self.sources))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            def call(method, target, body=None, headers=None):
+                connection = http.client.HTTPConnection('ops')
+                connection.sock = socket.socket(socket.AF_UNIX)
+                connection.sock.connect(path)
+                connection.request(method, target, body=body, headers=headers or {})
+                response = connection.getresponse()
+                return response.status, dict(response.getheaders()), response.read()
+
+            status, headers, body = call('GET', f'/api/v1/exports/{item["id"]}/download')
+            self.assertEqual((status, headers['Content-Type'], int(headers['Content-Length'])),
+                             (200, 'application/octet-stream', item['size_bytes']))
+            self.assertEqual(headers['Cache-Control'], 'no-store')
+            self.assertTrue(tarfile.is_tarfile(io.BytesIO(body)))
+            status, _, reply = call('POST', '/api/v1/imports', body[:100],
+                                    {'Content-Type': 'application/octet-stream'})
+            self.assertEqual(status, 201)
+            self.assertRegex(json.loads(reply)['import'], r'^imp_[0-9a-f]{32}$')
+            status, _, reply = call('POST', '/api/v1/imports', b'x', {'Content-Type': 'text/plain'})
+            self.assertEqual((status, json.loads(reply)['error']['code']), (415, 'unsupported_media_type'))
+            status, _, _ = call('GET', '/api/v1/exports/exp_' + '0' * 32 + '/download')
+            self.assertEqual(status, 404)
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == '__main__':

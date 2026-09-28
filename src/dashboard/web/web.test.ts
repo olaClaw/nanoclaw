@@ -29,11 +29,14 @@ import {
 import {
   COOKIE,
   INSECURE_COOKIE,
+  MAX_UPLOAD_BYTES,
   OPS_ENDPOINTS,
   createDashboardServer,
   socketForward,
+  socketStream,
   type DashboardConfig,
   type Forward,
+  type StreamForward,
 } from './server.js';
 import { ABSOLUTE_MS, IDLE_MS, REAUTH_MS, SessionStore } from './sessions.js';
 import { DashboardState } from './state.js';
@@ -60,8 +63,16 @@ describe('operations routing', () => {
         'backup_key_saved',
         'backup_verify',
         'backups',
+        'export_delete',
+        'export_download',
+        'export_key',
+        'export_key_saved',
+        'exports',
         'import_apply',
+        'import_delete',
         'import_preflight',
+        'import_upload',
+        'imports',
         'job',
         'releases',
         'update',
@@ -492,7 +503,10 @@ describe('dashboard server end to end over the host boundary', () => {
     expect(
       (await call('POST', '/api/v1/session/reauth', { body: { password: 'wrong password again' }, headers })).status,
     ).toBe(401);
-    const reauth = await call('POST', '/api/v1/session/reauth', { body: { password: PASSWORD }, headers });
+    const reauth = await call('POST', '/api/v1/session/reauth', {
+      body: { password: PASSWORD },
+      headers: { cookie, origin: ORIGIN, 'x-csrf-token': csrf },
+    });
     expect((reauth.json() as { reauth_expires_at: string | null }).reauth_expires_at).not.toBeNull();
     expect((await call('POST', '/api/v1/updates', { body: update, headers })).status).toBe(501);
     clock += REAUTH_MS + 1;
@@ -595,7 +609,10 @@ describe('dashboard server end to end over the host boundary', () => {
     );
     const { cookie, csrf } = await login();
     const headers = { cookie, origin: ORIGIN, 'x-csrf-token': csrf };
-    await call('POST', '/api/v1/session/reauth', { body: { password: PASSWORD }, headers });
+    await call('POST', '/api/v1/session/reauth', {
+      body: { password: PASSWORD },
+      headers: { cookie, origin: ORIGIN, 'x-csrf-token': csrf },
+    });
     const apply = await call('POST', '/api/v1/model-settings/apply', {
       body: { preflight_id: 'pfl_' + '3'.repeat(16), confirm: true },
       headers,
@@ -639,6 +656,73 @@ describe('dashboard server end to end over the host boundary', () => {
     // The https cookie name means nothing here.
     const renamed = cookie.replace(INSECURE_COOKIE, COOKIE);
     expect((await call('GET', '/api/v1/agents', { headers: { cookie: renamed } })).status).toBe(401);
+  });
+
+  it('streams export downloads and import uploads through the operations service', async () => {
+    const exportId = 'exp_' + '1'.repeat(32);
+    const received: Array<{ type: string | undefined; body: string }> = [];
+    const ops = http.createServer((req, res) => {
+      if (req.method === 'GET' && req.url === `/api/v1/exports/${exportId}/download`) {
+        res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': '11' });
+        res.end('BUNDLE-DATA');
+        return;
+      }
+      if (req.method === 'POST' && req.url === '/api/v1/imports') {
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', () => {
+          received.push({ type: req.headers['content-type'], body: Buffer.concat(chunks).toString() });
+          res.writeHead(201, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ import: 'imp_' + '2'.repeat(32) }));
+        });
+        return;
+      }
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { code: 'not_found', request_id: 'req_' + '0'.repeat(16) } }));
+    });
+    const opsSocket = path.join(socketDir, 'ops.sock');
+    await new Promise<void>((resolve) => ops.listen(opsSocket, resolve));
+    try {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await start(undefined, undefined, { opsStream: socketStream(opsSocket) });
+      const { cookie, csrf } = await login();
+      const download = await call('GET', `/api/v1/exports/${exportId}/download`, { headers: { cookie } });
+      expect(download.status).toBe(200);
+      expect(download.body).toBe('BUNDLE-DATA');
+      expect(download.headers['content-type']).toBe('application/octet-stream');
+      expect(download.headers['content-disposition']).toBe('attachment; filename="nanoclaw-export.ncx"');
+      expect(download.headers['cache-control']).toBe('no-store');
+      expect(download.headers['x-content-type-options']).toBe('nosniff');
+      const missing = await call('GET', `/api/v1/exports/exp_${'9'.repeat(32)}/download`, { headers: { cookie } });
+      expect(missing.status).toBe(404);
+
+      const headers = { cookie, origin: ORIGIN, 'x-csrf-token': csrf, 'content-type': 'application/octet-stream' };
+      const raw = (extra: Record<string, string>, body: string) =>
+        new Promise<number>((resolve) => {
+          const request = http.request(
+            { host: '127.0.0.1', port, method: 'POST', path: '/api/v1/imports', headers: { ...headers, ...extra } },
+            (response) => {
+              response.resume();
+              resolve(response.statusCode!);
+            },
+          );
+          request.on('error', () => resolve(-1));
+          request.end(body);
+        });
+      expect(await raw({}, 'ENCRYPTED')).toBe(403); // reauth first
+      await call('POST', '/api/v1/session/reauth', {
+        body: { password: PASSWORD },
+        headers: { cookie, origin: ORIGIN, 'x-csrf-token': csrf },
+      });
+      expect(await raw({ 'content-type': 'text/plain' }, 'ENCRYPTED')).toBe(415);
+      expect(await raw({ 'content-length': String(MAX_UPLOAD_BYTES + 1) }, '')).toBe(413);
+      expect(await raw({ 'x-csrf-token': 'x'.repeat(43) }, 'ENCRYPTED')).toBe(403);
+      expect(received).toEqual([]);
+      expect(await raw({}, 'ENCRYPTED')).toBe(201);
+      expect(received).toEqual([{ type: 'application/octet-stream', body: 'ENCRYPTED' }]);
+    } finally {
+      await new Promise<void>((resolve) => ops.close(() => resolve()));
+    }
   });
 
   it('audits state changes with endpoint, status and request id only', async () => {
