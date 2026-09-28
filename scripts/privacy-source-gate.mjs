@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const ACCEPTED_UPSTREAM = 'b200712e53e514515fd68a153e58ab287971aeab';
+export const ACCEPTED_UPSTREAM = '5e4f4b7db5160b5834b526a762329b2deba05ac0';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const maxBytes = 32 * 1024 * 1024;
 const safeHomeNames = new Set([
