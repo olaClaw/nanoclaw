@@ -62,6 +62,8 @@ OUTCOMES = {'running', 'preflight_ok', 'succeeded', 'failed', 'rolled_back', 'ro
 ROLLBACKS = {'not_needed', 'healthy', 'failed_manual_recovery_needed'}
 MAX_BODY = 64 * 1024
 LOCK_FILE = '.compose-release-update.lock'
+# Written by the host while it changes the install-wide model (src/dashboard/host/model-apply.ts).
+MODEL_JOURNAL = 'model-settings.journal.json'
 OPS_JOB = re.compile(r'[0-9a-f]{16}\Z')
 KEY = re.compile(r'[0-9a-f]{64}\Z')
 BACKUP_PHASES = {'backup', 'done'}
@@ -315,6 +317,8 @@ class Sources:
 
     def delete_backup(self, public):
         """Remove one backup (archive, manifest and any key still here); never the last one."""
+        if self.model_change_pending():
+            raise OpsError(409, 'operation_in_progress')
         if not self.running.acquire(blocking=False):
             raise OpsError(409, 'operation_in_progress')
         lock = None
@@ -338,6 +342,10 @@ class Sources:
             if lock is not None:
                 os.close(lock)
             self.running.release()
+
+    def model_change_pending(self):
+        """A dashboard model change is mid-way (or needs manual recovery): its journal is in data/."""
+        return os.path.lexists(self.state_root / 'data' / MODEL_JOURNAL)
 
     def ops_job_path(self, job_id):
         return self.jobs_dir / f'{job_id}.json'
@@ -398,6 +406,8 @@ class Sources:
     def start_backup(self):
         if not (self.key_root and self.project_root and self.jobs_dir and self.recovery_script):
             raise OpsError(501, 'not_implemented')
+        if self.model_change_pending():
+            raise OpsError(409, 'operation_in_progress')
         if not self.running.acquire(blocking=False):
             raise OpsError(409, 'operation_in_progress')
         lock = None
@@ -487,6 +497,8 @@ class UpdateRunner:
         installed = src.release(src.state_root / 'release.json')
         if not isinstance(manifest, dict) or manifest.get('revision') != revision or not installed:
             raise OpsError(409, 'candidate_unknown')
+        if src.model_change_pending():
+            raise OpsError(409, 'operation_in_progress')
         if not src.running.acquire(blocking=False):
             raise OpsError(409, 'operation_in_progress')
         try:

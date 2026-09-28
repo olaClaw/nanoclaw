@@ -62,6 +62,7 @@ import './cli/delivery-action.js';
 import { startCliServer, stopCliServer } from './cli/socket-server.js';
 import { startDashboardAdminSocket, stopDashboardAdminSocket } from './dashboard/host/admin-socket.js';
 import { liveHostSources, loadIdKey } from './dashboard/host/host-sources.js';
+import { recoverModelApply } from './dashboard/host/model-apply.js';
 
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
 import {
@@ -94,6 +95,9 @@ async function main(): Promise<void> {
   // Idempotent — skips groups that already have a config row.
   if (db.dialect === 'sqlite') await backfillContainerConfigs();
   else log.info('Skipping local container.json backfill for non-local central DB');
+
+  // 1c. A dashboard model change cut off mid-way is rolled back before any agent starts.
+  await recoverModelApply();
 
   // Prepare the runtime; inbound routing waits until approval health and adoption are ready.
   await getSessionDriver().ensureReady?.();

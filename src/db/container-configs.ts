@@ -1,4 +1,4 @@
-import { DEFAULT_AGENT_PROVIDER } from '../config.js';
+import { defaultAgentProvider } from '../model-settings.js';
 import type { ContainerConfigRow } from '../types.js';
 import { getDb } from './connection.js';
 
@@ -45,7 +45,7 @@ export async function createContainerConfig(config: ContainerConfigRow): Promise
  * overwritten (load-bearing: this is how the global default stays "new groups
  * only" for groups that already have a row).
  *
- * An absent `provider` takes the instance default (`DEFAULT_AGENT_PROVIDER`);
+ * An absent `provider` takes the instance default (the dashboard's choice, else `DEFAULT_AGENT_PROVIDER`);
  * `claude` and an absent value that resolves to claude are stored as NULL — the
  * column means "follows the built-in default", matching pre-feature rows.
  */
@@ -61,7 +61,7 @@ export async function ensureContainerConfig(agentGroupId: string, provider?: str
   // explicitly and override the default.
   // `claude` (the built-in default) and casing normalize to NULL/lowercase so the
   // column matches what resolution lowercases to.
-  const normalized = (provider ?? DEFAULT_AGENT_PROVIDER).toLowerCase();
+  const normalized = (provider ?? defaultAgentProvider()).toLowerCase();
   const stamped = normalized && normalized !== 'claude' ? normalized : null;
   await getDb().run(
     `INSERT INTO container_configs (agent_group_id, provider, updated_at)

@@ -185,16 +185,20 @@ describe('dashboard server end to end over the host boundary', () => {
     idKey: Buffer.alloc(32, 7),
     channels: () => [{ key: 'cli', channelType: 'cli', connected: true }],
     release: () => ({ version: '2.4.0', revision: 'a'.repeat(40) }),
-    defaults: { provider: 'opencode', model: 'fixture-model-a', endpointConfigured: true },
+    defaults: { provider: 'opencode', model: 'fixture-model-a', opencodeModel: '', endpointConfigured: true },
     now: () => new Date('2026-01-15T12:00:00Z'),
     restartAgent: async () => 1,
+    dataDir: os.tmpdir(),
+    probeModel: async () => ({ reason: null, models: [], contextLimit: null }),
+    endpointState: async () => 'unknown',
   };
 
-  async function start(forward?: Forward): Promise<void> {
+  async function start(forward?: Forward, opsForward?: Forward): Promise<void> {
     server = createDashboardServer({
       state,
       origin: ORIGIN,
       forward: forward ?? socketForward(path.join(socketDir, 'admin.sock')),
+      opsForward,
       now: () => clock,
       scrypt: FAST,
     });
@@ -526,6 +530,67 @@ describe('dashboard server end to end over the host boundary', () => {
     const response = await call('GET', '/api/v1/agents', { headers: { cookie } });
     expect(response.status).toBe(502);
     expect(findLeaks(response.body)).toEqual([]);
+  });
+
+  it('finds host jobs behind the operations service and keeps maintenance jobs apart', async () => {
+    const hostJob = 'job_' + '1'.repeat(16);
+    let outcome = 'running';
+    const record = () => ({
+      id: hostJob,
+      kind: 'model_settings_apply',
+      phase: 'restart_agents',
+      outcome,
+      failure_category: null,
+      rollback: outcome === 'running' ? null : 'not_needed',
+      release: null,
+      backup: null,
+      phases: [{ phase: 'snapshot', at: '2026-01-15T12:00:00Z' }],
+      started_at: '2026-01-15T12:00:00Z',
+      updated_at: '2026-01-15T12:00:00Z',
+      finished_at: outcome === 'running' ? null : '2026-01-15T12:01:00Z',
+    });
+    const opsCalls: string[] = [];
+    const notFound = { status: 404, body: { error: { code: 'not_found', request_id: 'req_' + '0'.repeat(16) } } };
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await start(
+      async (method, target) => {
+        if (method === 'POST' && target === '/api/v1/model-settings/apply') {
+          return { status: 200, body: { job: { id: hostJob, kind: 'model_settings_apply' } } };
+        }
+        if (target === `/api/v1/jobs/${hostJob}`) return { status: 200, body: record() };
+        return notFound;
+      },
+      async (method, target) => {
+        opsCalls.push(`${method} ${target}`);
+        if (method === 'POST' && target === '/api/v1/backups') {
+          return { status: 202, body: { job: { id: 'job_' + '2'.repeat(16), kind: 'backup_create' } } };
+        }
+        return notFound;
+      },
+    );
+    const { cookie, csrf } = await login();
+    const headers = { cookie, origin: ORIGIN, 'x-csrf-token': csrf };
+    await call('POST', '/api/v1/session/reauth', { body: { password: PASSWORD }, headers });
+    const apply = await call('POST', '/api/v1/model-settings/apply', {
+      body: { preflight_id: 'pfl_' + '3'.repeat(16), confirm: true },
+      headers,
+    });
+    expect(apply.status).toBe(200);
+
+    const found = await call('GET', `/api/v1/jobs/${hostJob}`, { headers: { cookie } });
+    expect([found.status, (found.json() as { outcome: string }).outcome]).toEqual([200, 'running']);
+    expect(opsCalls).toContain(`GET /api/v1/jobs/${hostJob}`);
+
+    const busy = await call('POST', '/api/v1/backups', { body: { confirm: true }, headers });
+    expect([busy.status, (busy.json() as { error: { code: string } }).error.code]).toEqual([
+      409,
+      'operation_in_progress',
+    ]);
+    expect(opsCalls).not.toContain('POST /api/v1/backups');
+
+    outcome = 'succeeded';
+    expect((await call('POST', '/api/v1/backups', { body: { confirm: true }, headers })).status).toBe(202);
+    expect(opsCalls).toContain('POST /api/v1/backups');
   });
 
   it('audits state changes with endpoint, status and request id only', async () => {

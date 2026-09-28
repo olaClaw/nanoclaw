@@ -28,9 +28,12 @@ function sources(changes: Partial<HostSources> = {}): HostSources {
       { key: 'cli', channelType: 'cli', connected: true },
     ],
     release: () => ({ version: '2.4.0', revision: 'a'.repeat(40) }),
-    defaults: { provider: 'opencode', model: 'fixture-model-a', endpointConfigured: true },
+    defaults: { provider: 'opencode', model: 'fixture-model-a', opencodeModel: '', endpointConfigured: true },
     now: () => new Date('2026-01-15T12:34:56.789Z'),
     restartAgent: async () => 1,
+    dataDir: os.tmpdir(),
+    probeModel: async () => ({ reason: null, models: [], contextLimit: null }),
+    endpointState: async () => 'reachable',
     ...changes,
   };
 }
@@ -104,14 +107,37 @@ describe('read-only projections over the synthetic install', () => {
   });
 
   it('see mixed model settings when agents disagree, uniform ones when they follow the default', async () => {
-    const mixed = sources({ defaults: { provider: 'claude', model: '', endpointConfigured: false } });
+    const mixed = sources({
+      defaults: { provider: 'claude', model: '', opencodeModel: '', endpointConfigured: false },
+    });
     expect((await get('/api/v1/model-settings', mixed)).body).toMatchObject({
       mode: 'mixed',
       agents: { total: 2, matching: 1 },
+      endpoint_status: { configured: false, state: 'unknown' },
     });
-    // The helper has no override, so it follows the default the main agent pins.
+    // A config row without a provider runs on Claude, as at spawn: still mixed.
+    expect((await get('/api/v1/model-settings')).body).toMatchObject({
+      mode: 'mixed',
+      agents: { total: 2, matching: 1 },
+      endpoint_status: { configured: true, state: 'reachable' },
+    });
+    // Once the helper is on OpenCode it follows the install default model.
+    await getDb().run(
+      "UPDATE container_configs SET provider = 'opencode' WHERE agent_group_id = ?",
+      SYNTHETIC.agents.helper.id,
+    );
     expect((await get('/api/v1/model-settings')).body).toMatchObject({
       mode: 'local',
+      model: 'fixture-model-a',
+      agents: { total: 2, matching: 2 },
+    });
+    // With no install default, OpenCode groups fall back to OpenCode's own model.
+    const opencodeOnly = sources({
+      defaults: { provider: 'opencode', model: '', opencodeModel: 'openai/fixture-model-a', endpointConfigured: true },
+    });
+    await getDb().run('UPDATE container_configs SET model = NULL');
+    expect((await get('/api/v1/model-settings', opencodeOnly)).body).toMatchObject({
+      model: 'openai/fixture-model-a',
       agents: { total: 2, matching: 2 },
     });
   });

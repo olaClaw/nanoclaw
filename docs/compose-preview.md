@@ -269,6 +269,53 @@ say the service is not active and the CLI tools keep working as before.
    `systemctl daemon-reload && systemctl enable --now nanoclaw-ops nanoclaw-ops-candidates.timer`.
 4. Recreate the `dashboard` service so it sees the socket.
 
+### Changing the LLM and model from the panel
+
+The **Modello e provider** screen changes the local LLM endpoint and model
+for **every** agent at once, and for agents created later; there is no
+per-agent choice. v1 supports the local path only: OpenCode against an
+OpenAI-compatible server (vLLM, llama.cpp, …) on the LAN or VPN. External
+providers are refused until their credentials can be checked per agent.
+
+1. Enter the endpoint (for example `http://LLM_HOST:8000/v1`) and the model ID
+   exactly as the server lists it, then **Verifica**. The host checks the
+   address (http(s), no credentials or query; it must resolve only to a
+   private LAN/VPN address, never loopback, link-local, a single-label service
+   name or one of the stack's own networks), lists the server's models (they
+   become suggestions for the field) and asks the model for a one-token
+   answer. It never follows redirects and sends no credentials, so an
+   endpoint that needs an API key is refused for now.
+2. The result lists the agents and how many active sessions will restart.
+   **Applica a tutti gli agenti** (after the password again) starts the job.
+
+The panel does not edit `.env`. Its choice lives in
+`/srv/nanoclaw/data/model-settings.json` (host-owned, `0600`, included in
+every backup) and wins over the `.env` values it replaces: the default
+provider and model for new groups (`DEFAULT_AGENT_PROVIDER`,
+`NANOCLAW_DEFAULT_MODEL`) and OpenCode's `OPENCODE_PROVIDER`,
+`OPENCODE_BASE_URL`, `OPENCODE_MODEL` and `OPENCODE_SMALL_MODEL` (which
+follows the main model). When the server reports the model's context window
+(vLLM `max_model_len`) it replaces `OPENCODE_MODEL_CONTEXT_LIMIT`, and an
+output limit that no longer fits is dropped. Model-specific settings such as
+`OPENCODE_MODEL_INPUT_MODALITIES` stay in `.env`: check them when the new
+model accepts different inputs. To go back to `.env` alone, stop the host,
+remove the file and start it again; the per-group rows keep the model the
+panel wrote, so change them with `ncl groups config update` if needed.
+
+The job first writes a journal (`model-settings.journal.json` next to the
+settings) with the previous settings and every group's provider and model,
+then writes the settings, updates every group row (creating missing ones) and
+any session pinned to another provider in one transaction, restarts every
+agent and checks the rows and the endpoint again. If a step fails it restores
+the journal exactly, restarts the agents again and reports *rolled back*. If
+the host stops mid-way, the next start restores the journal before any agent
+runs and marks the job *interrupted*. While the journal exists the operations
+service refuses backups, backup deletion and updates. If even the rollback
+fails the job says *rollback failed* and the journal stays: restarting the
+host retries the restore; check the host log (`Model settings rollback`) if
+it keeps failing. The job record is `model-settings.job.json` and never holds
+the endpoint.
+
 ### HTTPS proxy
 
 `proxy` is Nginx Proxy Manager 2.16.0, pinned by digest in `compose.yaml`. It

@@ -231,8 +231,9 @@ export const channelStateRequest = object({ enabled: bool, confirm: confirmed })
 
 /**
  * Model settings apply to every agent and to the default for new ones.
- * `endpoint` is write-only: accepted here, never returned. SSRF rules for it
- * are part of D3a; the contract only bounds its shape.
+ * `endpoint` is write-only: accepted here, never returned. The host enforces
+ * the SSRF rules (src/dashboard/host/model-endpoint.ts); the contract only
+ * bounds its shape. `model` is the ID exactly as the endpoint lists it.
  */
 export const modelPreflightRequest = object({
   mode: oneOf('local', 'external'),
@@ -243,9 +244,13 @@ export const modelPreflightRequest = object({
 export const modelPreflight = object({
   preflight_id: preflightId,
   ready: bool,
+  /** Why the change cannot start, when the cause is global (endpoint, model, provider). */
+  reason: nullable(code),
   leaves_lan: bool,
   agents: array(object({ id: agentId, ready: bool, reason: nullable(code) }), MAX_PAGE),
   sessions_to_restart: COUNT,
+  /** Models the endpoint lists, to pick from; IDs that are not plain identifiers are left out. */
+  available_models: array(modelName, 50),
   expires_at: timestamp,
 });
 export const modelApplyRequest = object({ preflight_id: preflightId, confirm: confirmed });

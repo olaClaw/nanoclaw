@@ -21,7 +21,7 @@ Status: planning. References: [design.md](design.md) and
 | D2 | Administrator login | Local bootstrap, password hash, rate limit, sessions, logout/reset | D0 |
 | D8 | HTTPS ingress | NPM pinned image, DNS-01, 443 on LAN/VPN only, NPM admin not public | D0; before real browser access |
 | D3 | Read-only panel | Overview, agents, channels, backup/release state with redacted data | D1, D2 |
-| D3a | Model configuration | Preflight of local endpoint/remote provider and of every agent, write-only credentials, global apply to existing and future agents, coordinated restart and rollback | D1–D3, provider/gateway ready |
+| D3a | Model configuration | Preflight of local endpoint/remote provider and of every agent, write-only credentials, global apply to existing and future agents, coordinated restart and rollback. **Local path done**; remote providers wait for a per-agent credential check | D1–D3, provider/gateway ready |
 | D4 | Local backup | Asynchronous job, lock, preflight, backup, verification, progress, restart | Stable recovery, D1–D3 |
 | D5 | Portable export/import | Encrypted bundle, upload in quarantine, preflight, target backup, clone/migration | D4, stable import controller |
 | D6 | Administrative operations | Agent restart and write-only secrets, confirmations, audit | D1–D3 |

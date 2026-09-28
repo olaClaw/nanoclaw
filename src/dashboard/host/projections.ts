@@ -25,6 +25,7 @@ import {
 import { publicId } from '../contract/opaque-id.js';
 import { validate, type Infer } from '../contract/schema.js';
 import type { channelList, modelSettings, sessionList } from '../contract/api.js';
+import type { ProbeResult } from './model-endpoint.js';
 
 export const PAGE_SIZE = 50;
 
@@ -33,10 +34,20 @@ export interface HostSources {
   idKey: Buffer;
   channels(): ReadonlyArray<{ key: string; channelType: string; connected: boolean }>;
   release(): { version: string; revision: string } | null;
-  defaults: { provider: string; model: string; endpointConfigured: boolean };
+  /**
+   * Install-wide defaults as containers would get them now: `model` for groups
+   * without their own, `opencodeModel` what OpenCode falls back to after that.
+   */
+  defaults: { provider: string; model: string; opencodeModel: string; endpointConfigured: boolean };
   now(): Date;
   /** Restart the agent group's running containers; resolves to how many. */
   restartAgent(internalId: string): Promise<number>;
+  /** Host-owned directory for the model settings file, its journal and job record. */
+  dataDir: string;
+  /** Check an endpoint (and a model on it, when given); see model-endpoint.ts. */
+  probeModel(endpoint: string, model: string | null): Promise<ProbeResult>;
+  /** Reachability of the configured local endpoint, cached briefly. */
+  endpointState(): Promise<'reachable' | 'unreachable' | 'unknown'>;
 }
 
 /** Providers whose model endpoint the operator configures on the LAN. */
@@ -100,12 +111,25 @@ async function agentFacts(): Promise<AgentFacts[]> {
   }));
 }
 
+// Same rule as spawn: a row without a provider runs on Claude; a group with no
+// row yet gets the install default stamped when it first starts.
+function rawProvider(facts: AgentFacts, sources: HostSources): string {
+  const pinned = facts.sessions.find((session) => session.status === 'active' && session.agent_provider);
+  if (pinned?.agent_provider) return pinned.agent_provider.toLowerCase();
+  if (!facts.config) return sources.defaults.provider.toLowerCase();
+  return (facts.config.provider || 'claude').toLowerCase();
+}
+
 function effectiveProvider(facts: AgentFacts, sources: HostSources): string | null {
-  return identifier(providerName, (facts.config?.provider ?? sources.defaults.provider).toLowerCase());
+  return identifier(providerName, rawProvider(facts, sources));
+}
+
+function defaultModelFor(provider: string, sources: HostSources): string | null {
+  return sources.defaults.model || (provider === 'opencode' ? sources.defaults.opencodeModel : '') || null;
 }
 
 function effectiveModel(facts: AgentFacts, sources: HostSources): string | null {
-  return identifier(modelName, facts.config?.model ?? (sources.defaults.model || null));
+  return identifier(modelName, facts.config?.model ?? defaultModelFor(rawProvider(facts, sources), sources));
 }
 
 function summary(facts: AgentFacts, sources: HostSources): AgentSummary {
@@ -222,8 +246,8 @@ export async function getModelSettings(sources: HostSources): Promise<Infer<type
   const counts = new Map<string, number>();
   for (const pair of pairs) counts.set(pair, (counts.get(pair) ?? 0) + 1);
   const [top] = [...counts.entries()].sort((a, b) => b[1] - a[1]);
-  const provider = identifier(providerName, sources.defaults.provider);
-  const model = identifier(modelName, sources.defaults.model || null);
+  const provider = identifier(providerName, sources.defaults.provider.toLowerCase());
+  const model = identifier(modelName, provider ? defaultModelFor(provider, sources) : null);
   const matching = pairs.filter((pair) => pair === `${provider}\0${model}`).length;
   const uniform = counts.size === 1 && top !== undefined && top[0] === `${provider}\0${model}`;
   return {
@@ -237,8 +261,10 @@ export async function getModelSettings(sources: HostSources): Promise<Infer<type
             : 'external',
     provider,
     model,
-    // Reachability needs a probe from the host; reported by D3a.
-    endpoint_status: { configured: sources.defaults.endpointConfigured, state: 'unknown' },
+    endpoint_status: {
+      configured: sources.defaults.endpointConfigured,
+      state: sources.defaults.endpointConfigured ? await sources.endpointState() : 'unknown',
+    },
     agents: { total: facts.length, matching },
   };
 }
@@ -254,7 +280,7 @@ export async function getOverview(sources: HostSources): Promise<Overview | null
     // reports it (D4/D7). The host reports itself.
     services: [{ name: 'nanoclaw', state: 'healthy' }],
     channels: { connected: channels.filter((item) => item.connected).length, total: channels.length },
-    llm: { state: 'unknown' },
+    llm: { state: sources.defaults.endpointConfigured ? await sources.endpointState() : 'unknown' },
     alerts: channels.some((item) => !item.connected) ? [{ code: 'channel_disconnected', severity: 'warning' }] : [],
   };
 }

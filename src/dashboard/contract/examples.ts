@@ -157,12 +157,14 @@ export const EXAMPLES: Readonly<Record<string, unknown>> = {
   model_preflight: {
     preflight_id: 'pfl_fedcba9876543210',
     ready: false,
+    reason: 'model_not_found',
     leaves_lan: false,
     agents: [
-      { id: AGENT_MAIN, ready: true, reason: null },
-      { id: AGENT_HELPER, ready: false, reason: 'provider_not_installed' },
+      { id: AGENT_MAIN, ready: false, reason: 'model_not_found' },
+      { id: AGENT_HELPER, ready: false, reason: 'model_not_found' },
     ],
     sessions_to_restart: 2,
+    available_models: ['fixture-model-a', 'fixture-model-b'],
     expires_at: '2026-01-15T12:15:00Z',
   },
   model_apply: accepted('model_settings_apply'),

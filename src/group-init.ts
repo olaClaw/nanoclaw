@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 
-import { DATA_DIR, DEFAULT_AGENT_PROVIDER, GROUPS_DIR } from './config.js';
+import { DATA_DIR, GROUPS_DIR } from './config.js';
+import { defaultAgentProvider } from './model-settings.js';
 import { ensureContainerConfig } from './db/container-configs.js';
 import { stageGroupPersona } from './group-persona.js';
 import { log } from './log.js';
@@ -38,7 +39,7 @@ export async function initGroupFilesystem(
   // explicitly — including `claude` — which pins the group and skips the
   // default. ensureContainerConfig is INSERT OR IGNORE, so this only stamps a
   // genuinely new group; existing rows are never touched.
-  const providerHint = (opts?.provider ?? DEFAULT_AGENT_PROVIDER).toLowerCase();
+  const providerHint = (opts?.provider ?? defaultAgentProvider()).toLowerCase();
 
   // Default agent surfaces apply unless the provider declares (at registration)
   // that it provides its own.

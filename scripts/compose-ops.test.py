@@ -426,6 +426,17 @@ class UpdateOperationTests(BackupOperationTests):
         finally:
             os.close(fd)
 
+    def test_backups_and_updates_wait_for_a_model_change(self):
+        data = self.sources.state_root / 'data'
+        data.mkdir(exist_ok=True)
+        (data / OPS.MODEL_JOURNAL).write_text('{}')
+        for path, body in (('/api/v1/backups', {'confirm': True}),
+                           ('/api/v1/updates', {'release_revision': self.revision, 'confirm': True})):
+            with self.subTest(path=path), self.assertRaises(OPS.OpsError) as caught:
+                OPS.handle(self.sources, 'POST', path, body)
+            self.assertEqual((caught.exception.status, caught.exception.code), (409, 'operation_in_progress'))
+        self.assertEqual(list((self.root / 'jobs').iterdir()), [])
+
 
 class BackupDeleteTests(BackupOperationTests):
     def make(self, count):
