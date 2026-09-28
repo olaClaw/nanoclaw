@@ -19,15 +19,26 @@ import { log } from './log.js';
 
 export const MODEL_SETTINGS_FILE = 'model-settings.json';
 
+/**
+ * The install-wide choice. `local`: OpenCode against an OpenAI-compatible
+ * server on the LAN. The others leave the LAN through the credential gateway:
+ * `claude` (Claude Agent SDK, Anthropic API key), `openai` (OpenCode, OpenAI
+ * API key), `chatgpt` (OpenCode, ChatGPT subscription sign-in).
+ */
+export type ModelProfile = 'local' | 'claude' | 'openai' | 'chatgpt';
+
 export interface ModelSettings {
   version: 1;
-  /** Agent provider for every group; v1 supports the local OpenCode path only. */
-  provider: 'opencode';
-  /** OpenCode's backend: `openai` with a base URL is an OpenAI-compatible server. */
-  backend: 'openai';
-  /** OpenAI-compatible base URL on the LAN, e.g. `http://LLM_HOST:8000/v1`. */
-  endpoint: string;
-  /** `backend/model-id`, the form group configs and OpenCode prompts use. */
+  profile: ModelProfile;
+  /** Agent provider stamped on every group. */
+  provider: 'opencode' | 'claude';
+  /** OpenCode's backend; null for Claude. */
+  backend: 'openai' | null;
+  /** `local`: the LAN base URL, e.g. `http://LLM_HOST:8000/v1`; `native` for OpenAI/ChatGPT; null for Claude. */
+  endpoint: string | null;
+  /** OpenCode's auth mode; null for Claude. */
+  auth_mode: 'api-key' | 'chatgpt' | null;
+  /** The group model: `openai/<id>` for OpenCode, the model ID for Claude. */
   model: string;
   /** Context window the endpoint reports for the model, when it reports one. */
   context_limit: number | null;
@@ -36,19 +47,34 @@ export interface ModelSettings {
 
 let cache: { key: string; value: ModelSettings | null } | null = null;
 
+const SHAPES: Readonly<Record<ModelProfile, (v: Record<string, unknown>) => boolean>> = {
+  local: (v) =>
+    v.provider === 'opencode' &&
+    v.backend === 'openai' &&
+    typeof v.endpoint === 'string' &&
+    /^https?:\/\/\S+$/.test(v.endpoint) &&
+    v.auth_mode === 'api-key',
+  openai: (v) =>
+    v.provider === 'opencode' && v.backend === 'openai' && v.endpoint === 'native' && v.auth_mode === 'api-key',
+  chatgpt: (v) =>
+    v.provider === 'opencode' && v.backend === 'openai' && v.endpoint === 'native' && v.auth_mode === 'chatgpt',
+  claude: (v) => v.provider === 'claude' && v.backend === null && v.endpoint === null && v.auth_mode === null,
+};
+
 function parse(raw: string): ModelSettings | null {
   const value = JSON.parse(raw) as Record<string, unknown>;
+  if (!value || typeof value !== 'object' || value.version !== 1) return null;
+  // Files from before external providers were local ones, without these two fields.
+  if (value.profile === undefined) value.profile = 'local';
+  if (value.auth_mode === undefined && value.profile === 'local') value.auth_mode = 'api-key';
+  const shape = SHAPES[value.profile as ModelProfile];
+  const prefix = value.provider === 'opencode' ? 'openai/' : '';
   const ok =
-    value &&
-    typeof value === 'object' &&
-    value.version === 1 &&
-    value.provider === 'opencode' &&
-    value.backend === 'openai' &&
-    typeof value.endpoint === 'string' &&
-    /^https?:\/\/\S+$/.test(value.endpoint) &&
+    typeof shape === 'function' &&
+    shape(value) &&
     typeof value.model === 'string' &&
-    value.model.startsWith('openai/') &&
-    value.model.length > 'openai/'.length &&
+    value.model.startsWith(prefix) &&
+    value.model.length > prefix.length &&
     value.model.length <= 256 &&
     (value.context_limit === null ||
       (typeof value.context_limit === 'number' &&
@@ -145,9 +171,9 @@ export function defaultModel(): string {
  */
 export function applyOpenCodeOverrides(env: Record<string, string>, dataDir = DATA_DIR): void {
   const settings = readModelSettings(dataDir);
-  if (!settings) return;
-  env.OPENCODE_PROVIDER = settings.backend;
-  env.OPENCODE_BASE_URL = settings.endpoint;
+  if (!settings || settings.provider !== 'opencode') return;
+  env.OPENCODE_PROVIDER = settings.backend!;
+  env.OPENCODE_BASE_URL = settings.endpoint!;
   env.OPENCODE_MODEL = settings.model;
   env.OPENCODE_SMALL_MODEL = settings.model;
   if (settings.context_limit !== null) {
@@ -157,4 +183,10 @@ export function applyOpenCodeOverrides(env: Record<string, string>, dataDir = DA
       delete env.OPENCODE_MODEL_OUTPUT_LIMIT;
     }
   }
+}
+
+/** OpenCode's auth mode when the panel chose an OpenCode profile; undefined leaves `.env` in charge. */
+export function openCodeAuthModeOverride(dataDir = DATA_DIR): 'api-key' | 'chatgpt' | undefined {
+  const settings = readModelSettings(dataDir);
+  return settings?.provider === 'opencode' ? (settings.auth_mode ?? undefined) : undefined;
 }

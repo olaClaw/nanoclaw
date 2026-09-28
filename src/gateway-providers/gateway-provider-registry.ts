@@ -123,6 +123,20 @@ export interface GatewayProviderDefinition {
   connections?: {
     connect(input: { agentGroupId: string; host: string }): Promise<GatewayConnectionResult>;
   };
+  /**
+   * Read-only credential check: one GET to `url` as the agent group would make
+   * it, with the credential the gateway injects for that group. Must not grant
+   * credentials, change policy or log the answer. Returns the status (and who
+   * answered: the target, or the gateway refusing) plus a small JSON body.
+   */
+  probes?: {
+    get(input: {
+      agentGroupId: string;
+      groupName: string;
+      url: string;
+      headers?: Record<string, string>;
+    }): Promise<{ status: number; from: 'upstream' | 'proxy'; body: unknown }>;
+  };
   /** Only the selected gateway's skills and instructions reach an agent. */
   agentSkills: readonly string[];
   sessions: {

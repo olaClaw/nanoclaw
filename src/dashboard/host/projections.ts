@@ -46,6 +46,16 @@ export interface HostSources {
   dataDir: string;
   /** Check an endpoint (and a model on it, when given); see model-endpoint.ts. */
   probeModel(endpoint: string, model: string | null): Promise<ProbeResult>;
+  /**
+   * One read-only GET as the agent group through the credential gateway
+   * (external provider checks); null when the gateway cannot do it.
+   */
+  probeGateway(
+    agentGroupId: string,
+    groupName: string,
+    url: string,
+    headers?: Record<string, string>,
+  ): Promise<{ status: number; from: 'upstream' | 'proxy'; body: unknown } | null>;
   /** Reachability of the configured local endpoint, cached briefly. */
   endpointState(): Promise<'reachable' | 'unreachable' | 'unknown'>;
 }

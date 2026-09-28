@@ -33,6 +33,7 @@ function sources(changes: Partial<HostSources> = {}): HostSources {
     restartAgent: async () => 1,
     dataDir: os.tmpdir(),
     probeModel: async () => ({ reason: null, models: [], contextLimit: null }),
+    probeGateway: async () => null,
     endpointState: async () => 'reachable',
     ...changes,
   };

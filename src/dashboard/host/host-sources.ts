@@ -13,6 +13,7 @@ import { readEnvFile } from '../../env.js';
 import { defaultAgentProvider, defaultModel, readModelSettings } from '../../model-settings.js';
 import { getCodeIdentity } from '../../upgrade-state.js';
 import { MIN_KEY_BYTES } from '../contract/opaque-id.js';
+import { getGatewayProvider } from '../../gateway-providers/index.js';
 import { liveEndpointDeps, probeEndpoint } from './model-endpoint.js';
 import type { HostSources } from './projections.js';
 
@@ -64,7 +65,12 @@ const REACHABILITY_TTL_MS = 60_000;
 /** The OpenCode endpoint and model containers start with: the panel's choice, else `.env`. */
 function openCodeTarget(): { endpoint: string; model: string } {
   const settings = readModelSettings();
-  if (settings) return { endpoint: settings.endpoint, model: settings.model };
+  // An external profile has no LAN endpoint to watch (Claude has no OpenCode model either).
+  if (settings) {
+    return settings.provider === 'opencode'
+      ? { endpoint: settings.profile === 'local' ? settings.endpoint! : '', model: settings.model }
+      : { endpoint: '', model: '' };
+  }
   const env = readEnvFile(['OPENCODE_BASE_URL', 'OPENCODE_MODEL']);
   return {
     endpoint: process.env.OPENCODE_BASE_URL || env.OPENCODE_BASE_URL || '',
@@ -96,6 +102,10 @@ export function liveHostSources(idKey: Buffer): HostSources {
     restartAgent: (internalId) => restartAgentGroupContainers(internalId, 'restarted from the dashboard'),
     dataDir: DATA_DIR,
     probeModel: (endpoint, model) => probeEndpoint(endpoint, model, liveEndpointDeps()),
+    async probeGateway(agentGroupId, groupName, url, headers) {
+      const probes = getGatewayProvider().probes;
+      return probes ? probes.get({ agentGroupId, groupName, url, headers }) : null;
+    },
     async endpointState() {
       const { endpoint } = openCodeTarget();
       if (!endpoint || endpoint === 'native') return 'unknown';
