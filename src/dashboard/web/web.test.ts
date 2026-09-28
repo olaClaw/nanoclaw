@@ -190,6 +190,7 @@ describe('dashboard server end to end over the host boundary', () => {
     restartAgent: async () => 1,
     dataDir: os.tmpdir(),
     probeModel: async () => ({ reason: null, models: [], contextLimit: null }),
+    probeGateway: async () => null,
     endpointState: async () => 'unknown',
   };
 

@@ -140,7 +140,7 @@ dd { margin: 0; font-weight: 600; }
 .login { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
 .login-card { width: min(420px, 100%); display: grid; gap: 14px; }
 .field { display: grid; gap: 5px; font-weight: 650; }
-.field input { border: 1px solid #abc0b0; border-radius: 9px; padding: 10px 11px; font: inherit; }
+.field input, .field select { border: 1px solid #abc0b0; border-radius: 9px; padding: 10px 11px; font: inherit; background: #fff; }
 .actions { display: flex; flex-wrap: wrap; gap: 9px; margin: 12px 0; }
 .inline-form { display: grid; gap: 10px; margin-bottom: 16px; }
 .key-card { border-color: #ead8a3; background: var(--warning-bg); margin-bottom: 16px; }
@@ -393,10 +393,15 @@ export const APP_JS = String.raw`'use strict';
   }
 
   const MODEL_REASONS = {
-    provider_unsupported: 'Per ora dal pannello si può scegliere solo un LLM locale compatibile OpenAI.',
+    provider_unsupported: 'Questa combinazione di provider non è disponibile.',
+    credential_missing: 'manca la credenziale in OneCLI o non è concessa a questo agente',
+    gateway_denied: 'OneCLI non permette a questo agente di usare il provider',
+    gateway_unreachable: 'OneCLI non risponde',
+    gateway_check_unsupported: 'Il gateway delle credenziali di questa istanza non permette la verifica per agente.',
+    provider_unreachable: 'il provider non risponde come previsto',
     provider_not_installed: 'OpenCode non è installato in questa istanza.',
     endpoint_required: 'Inserisci l\'indirizzo dell\'LLM.',
-    endpoint_invalid: 'Indirizzo non valido: usa http(s)://host:porta/percorso, senza credenziali né parametri.',
+    endpoint_invalid: 'Indirizzo non valido: usa http(s)://host:porta/percorso, senza credenziali né parametri (solo per l\'LLM locale).',
     endpoint_not_private: 'L\'indirizzo deve stare nella rete locale o nella VPN (non localhost né i servizi interni).',
     endpoint_unresolvable: 'Il server non riesce a risolvere questo nome.',
     endpoint_unreachable: 'L\'LLM non è raggiungibile dal server.',
@@ -416,42 +421,81 @@ export const APP_JS = String.raw`'use strict';
   };
   const reasonText = (code) => MODEL_REASONS[code] || ERRORS[code] || (code ? code.replaceAll('_', ' ') : 'errore');
 
+  const PROVIDERS = {
+    local: { label: 'LLM locale (compatibile OpenAI)', mode: 'local', provider: 'opencode', hint: 'es. Qwen/Qwen3-32B, come lo elenca il server' },
+    claude: { label: 'Claude (API Anthropic)', mode: 'external', provider: 'claude', hint: 'es. claude-sonnet-4-5, come lo elenca Anthropic' },
+    openai: { label: 'OpenAI (API a consumo)', mode: 'external', provider: 'openai', hint: 'es. gpt-5, come lo elenca OpenAI' },
+    chatgpt: { label: 'ChatGPT (abbonamento)', mode: 'external', provider: 'chatgpt', hint: 'es. gpt-5-codex' },
+  };
+
   function modelForm(view) {
-    const endpoint = el('input', { type: 'url', required: '', maxlength: '2048', autocomplete: 'off', spellcheck: 'false', placeholder: 'http://indirizzo-lan:8000/v1' });
+    const choice = el('select', {}, ...Object.entries(PROVIDERS).map(([key, p]) => el('option', { value: key }, p.label)));
+    const endpoint = el('input', { type: 'url', maxlength: '2048', autocomplete: 'off', spellcheck: 'false', placeholder: 'http://indirizzo-lan:8000/v1' });
+    const endpointField = el('label', { class: 'field' }, 'Indirizzo dell\'LLM locale (compatibile OpenAI)', endpoint);
     const choices = el('datalist', { id: 'model-choices' });
     const model = el('input', { type: 'text', required: '', maxlength: '120', autocomplete: 'off', spellcheck: 'false', list: 'model-choices' });
+    const note = el('p', { class: 'muted' });
     const result = el('div', {});
+    const sync = () => {
+      const p = PROVIDERS[choice.value];
+      endpointField.hidden = p.mode !== 'local';
+      endpoint.required = p.mode === 'local';
+      model.placeholder = p.hint;
+      note.textContent = p.mode === 'local'
+        ? 'Tutto resta nella rete locale.'
+        : 'Le credenziali restano in OneCLI: aggiungi lì la chiave (o l\'accesso ChatGPT) e concedila agli agenti, dalla sua console o con lo step di setup provider-auth. La verifica prova la credenziale di ogni agente.' +
+          (choice.value === 'chatgpt' ? ' Nota: la versione di OneCLI di questa installazione non rinnova da sola l\'accesso ChatGPT; quando scade serve un nuovo accesso.' : '');
+      choices.replaceChildren();
+      result.replaceChildren();
+    };
+    choice.addEventListener('change', sync);
     const form = el('form', { class: 'card wide inline-form' },
-      el('h2', {}, 'Cambia LLM e modello per tutti gli agenti'),
-      el('p', { class: 'muted' }, 'La scelta vale per tutti gli agenti, anche per quelli creati dopo. Prima si verifica che l\'LLM risponda con quel modello; se qualcosa va storto durante il cambio, la configurazione attuale viene ripristinata da sola.'),
-      el('label', { class: 'field' }, 'Indirizzo dell\'LLM locale (compatibile OpenAI)', endpoint),
-      el('label', { class: 'field' }, 'Modello, come lo elenca l\'LLM', model, choices),
+      el('h2', {}, 'Cambia provider e modello per tutti gli agenti'),
+      el('p', { class: 'muted' }, 'La scelta vale per tutti gli agenti, anche per quelli creati dopo. Prima si verifica che il modello risponda per ogni agente; se qualcosa va storto durante il cambio, la configurazione attuale viene ripristinata da sola.'),
+      el('label', { class: 'field' }, 'Dove gira il modello', choice),
+      note,
+      endpointField,
+      el('label', { class: 'field' }, 'Modello', model, choices),
       el('div', { class: 'actions' }, el('button', { class: 'primary', type: 'submit' }, 'Verifica')),
       result);
+    sync();
     const check = async () => {
+      const p = PROVIDERS[choice.value];
       result.replaceChildren(el('p', { class: 'muted' }, 'Verifica in corso…'));
-      const answer = await api('POST', '/model-settings/preflight', { mode: 'local', provider: 'opencode', model: model.value.trim(), endpoint: endpoint.value.trim() });
+      const answer = await api('POST', '/model-settings/preflight', {
+        mode: p.mode, provider: p.provider, model: model.value.trim(), endpoint: p.mode === 'local' ? endpoint.value.trim() : null,
+      });
       if (answer.status === 403 && answer.code === 'reauth_required') {
         result.replaceChildren();
         askPassword(view, 'Per cambiare il modello inserisci di nuovo la password.', check);
         return;
       }
       if (answer.status !== 200) { result.replaceChildren(el('p', { class: 'message error' }, ERRORS[answer.code] || 'Verifica non riuscita.')); return; }
-      const p = answer.data;
-      choices.replaceChildren(...p.available_models.map((id) => el('option', { value: id })));
-      if (!p.ready) {
-        const blocked = p.agents.filter((a) => !a.ready).length;
-        result.replaceChildren(el('div', {}, el('p', { class: 'message error' }, reasonText(p.reason || (p.agents.find((a) => a.reason) || {}).reason)),
-          p.reason ? null : el('p', { class: 'muted' }, blocked + ' agenti non pronti.')));
+      const r = answer.data;
+      choices.replaceChildren(...r.available_models.map((id) => el('option', { value: id })));
+      if (!r.ready) {
+        const blocked = r.agents.filter((a) => !a.ready);
+        const counts = {};
+        for (const a of blocked) counts[a.reason] = (counts[a.reason] || 0) + 1;
+        result.replaceChildren(el('div', {},
+          el('p', { class: 'message error' }, r.reason ? reasonText(r.reason) : 'Il cambio non può partire: ' + blocked.length + ' agenti su ' + r.agents.length + ' non sono pronti.'),
+          r.reason ? null : el('ul', {}, ...Object.entries(counts).map(([code, n]) => el('li', {}, n + (n === 1 ? ' agente: ' : ' agenti: ') + reasonText(code)))),
+          r.reason ? null : el('p', { class: 'muted' }, 'Sistema le credenziali in OneCLI e ripeti la verifica: finché anche un solo agente non è pronto, nulla cambia.')));
         return;
       }
       const apply = el('button', { class: 'primary', type: 'button' }, 'Applica a tutti gli agenti');
+      const understood = el('input', { type: 'checkbox' });
+      if (r.leaves_lan) {
+        apply.disabled = true;
+        understood.addEventListener('change', () => { apply.disabled = !understood.checked; });
+      }
       result.replaceChildren(el('div', {},
-        el('p', {}, 'Pronto: ' + p.agents.length + ' agenti passano a questo modello; ' + p.sessions_to_restart + ' sessioni attive verranno riavviate e riprendono al prossimo messaggio.'),
-        p.leaves_lan ? el('p', { class: 'message error' }, 'Attenzione: richieste e contesto di tutti gli agenti usciranno dalla rete locale.') : null,
+        el('p', {}, 'Pronto: ' + r.agents.length + ' agenti passano a questo modello; ' + r.sessions_to_restart + ' sessioni attive verranno riavviate e riprendono al prossimo messaggio.'),
+        r.leaves_lan ? el('p', { class: 'message error' }, 'Attenzione: richieste e contesto di tutti gli agenti (messaggi, memoria, file letti) usciranno dalla rete locale verso ' + PROVIDERS[choice.value].label + '.') : null,
+        r.leaves_lan ? el('label', { class: 'choice' }, understood, el('span', {}, 'Ho capito che i dati di tutti gli agenti andranno al provider esterno')) : null,
         el('div', { class: 'actions' }, apply,
           el('button', { class: 'secondary', type: 'button', onclick: () => result.replaceChildren() }, 'Annulla'))));
-      apply.addEventListener('click', () => applyModel(view, result, p.preflight_id));
+      apply.addEventListener('click', () => applyModel(view, result, r.preflight_id));
     };
     form.addEventListener('submit', (event) => { event.preventDefault(); check(); });
     return form;

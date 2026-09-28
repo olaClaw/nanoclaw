@@ -274,11 +274,37 @@ say the service is not active and the CLI tools keep working as before.
 
 ### Changing the LLM and model from the panel
 
-The **Modello e provider** screen changes the local LLM endpoint and model
-for **every** agent at once, and for agents created later; there is no
-per-agent choice. v1 supports the local path only: OpenCode against an
-OpenAI-compatible server (vLLM, llama.cpp, …) on the LAN or VPN. External
-providers are refused until their credentials can be checked per agent.
+The **Modello e provider** screen changes the provider and model for
+**every** agent at once, and for agents created later; there is no per-agent
+choice. The choices are:
+
+- **LLM locale**: OpenCode against an OpenAI-compatible server (vLLM,
+  llama.cpp, …) on the LAN or VPN. Details below.
+- **Claude** (Claude Agent SDK, Anthropic API key), **OpenAI** (OpenCode,
+  API key billed per use) and **ChatGPT** (OpenCode, the subscription
+  sign-in). These send the requests and context of **all** agents out of the
+  LAN; the panel says so and asks for an explicit acknowledgement.
+
+For an external provider the credential stays in OneCLI. Add it there and
+grant it to the agents first, from the OneCLI console or with the
+`provider-auth` setup step. The panel never sees it.
+
+**Verifica** then checks every agent group with one read-only request through
+OneCLI, exactly as the agent would make it:
+- Anthropic and OpenAI: `GET /v1/models`, which also confirms the model is
+  offered;
+- ChatGPT: an authenticated account read, since there is no model list.
+
+If any agent is not ready, nothing changes, and the panel shows why:
+- *manca la credenziale*: the provider answered 401/403;
+- *OneCLI non permette*: the gateway refused the agent;
+- *OneCLI non risponde*: the gateway is unreachable.
+
+NanoClaw's pinned OneCLI version does not refresh the ChatGPT sign-in by
+itself: when it expires, sign in again (see the OpenCode skill), and the
+check will say so until then.
+
+For the local LLM:
 
 1. Enter the endpoint (for example `http://LLM_HOST:8000/v1`) and the model ID
    exactly as the server lists it, then **Verifica**. The host checks the
@@ -295,9 +321,9 @@ The panel does not edit `.env`. Its choice lives in
 `/srv/nanoclaw/data/model-settings.json` (host-owned, `0600`, included in
 every backup) and wins over the `.env` values it replaces: the default
 provider and model for new groups (`DEFAULT_AGENT_PROVIDER`,
-`NANOCLAW_DEFAULT_MODEL`) and OpenCode's `OPENCODE_PROVIDER`,
-`OPENCODE_BASE_URL`, `OPENCODE_MODEL` and `OPENCODE_SMALL_MODEL` (which
-follows the main model). When the server reports the model's context window
+`NANOCLAW_DEFAULT_MODEL`) and, for the OpenCode choices, `OPENCODE_PROVIDER`,
+`OPENCODE_BASE_URL` (`native` for OpenAI and ChatGPT), `OPENCODE_AUTH_MODE`,
+`OPENCODE_MODEL` and `OPENCODE_SMALL_MODEL` (which follows the main model). When the server reports the model's context window
 (vLLM `max_model_len`) it replaces `OPENCODE_MODEL_CONTEXT_LIMIT`, and an
 output limit that no longer fits is dropped. Model-specific settings such as
 `OPENCODE_MODEL_INPUT_MODALITIES` stay in `.env`: check them when the new

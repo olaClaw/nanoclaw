@@ -171,6 +171,7 @@
     "src/gateway-providers/installed.ts",
     "src/gateway-providers/onecli-files.ts",
     "src/gateway-providers/onecli.ts",
+    "src/gateway-providers/probe-through-proxy.ts",
     "src/gateway-read-policy.ts",
     "src/gateway-session-lifecycle.ts",
     "src/group-folder.ts",

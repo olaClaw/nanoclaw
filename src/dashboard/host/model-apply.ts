@@ -24,6 +24,7 @@ import { getDb } from '../../db/connection.js';
 import { ensureContainerConfig } from '../../db/container-configs.js';
 import { log } from '../../log.js';
 import {
+  type ModelProfile,
   readModelSettings,
   readModelSettingsRaw,
   writeModelSettingsRaw,
@@ -40,8 +41,46 @@ export const JOURNAL_FILE = 'model-settings.journal.json';
 export const JOB_FILE = 'model-settings.job.json';
 const PREFLIGHT_TTL_MS = 10 * 60_000;
 const MAX_AGENTS = 200;
-const PROVIDER = 'opencode';
-const BACKEND = 'openai';
+
+/**
+ * The install-wide choices. External ones are checked per agent group through
+ * the credential gateway with one read-only GET, as the agent would make it.
+ */
+interface Profile {
+  provider: 'opencode' | 'claude';
+  backend: 'openai' | null;
+  auth: 'api-key' | 'chatgpt' | null;
+  /** Prefix of the stored group model (`openai/<id>` for OpenCode). */
+  prefix: string;
+  check?: { url: string; headers?: Record<string, string>; lists: boolean };
+}
+const PROFILES: Readonly<Record<ModelProfile, Profile>> = {
+  local: { provider: 'opencode', backend: 'openai', auth: 'api-key', prefix: 'openai/' },
+  openai: {
+    provider: 'opencode',
+    backend: 'openai',
+    auth: 'api-key',
+    prefix: 'openai/',
+    check: { url: 'https://api.openai.com/v1/models', lists: true },
+  },
+  chatgpt: {
+    provider: 'opencode',
+    backend: 'openai',
+    auth: 'chatgpt',
+    prefix: 'openai/',
+    // No model list for the subscription: an authenticated account read proves the sign-in works.
+    check: { url: 'https://chatgpt.com/backend-api/me', lists: false },
+  },
+  claude: {
+    provider: 'claude',
+    backend: null,
+    auth: null,
+    prefix: '',
+    check: { url: 'https://api.anthropic.com/v1/models', headers: { 'anthropic-version': '2023-06-01' }, lists: true },
+  },
+};
+const EXTERNAL: ReadonlySet<string> = new Set(['claude', 'openai', 'chatgpt']);
+const CHECK_CONCURRENCY = 4;
 
 type Job = Infer<typeof jobSchema>;
 type Preflight = Infer<typeof modelPreflight>;
@@ -64,12 +103,62 @@ interface Journal {
 }
 
 interface Pending {
-  endpoint: string;
+  profile: ModelProfile;
+  endpoint: string | null;
   model: string;
   contextLimit: number | null;
   groups: string;
   expires: number;
   ready: boolean;
+}
+
+/** The profile a request asks for, or null when the pair is not offered. */
+function profileOf(mode: string, provider: string): ModelProfile | null {
+  if (mode === 'local') return provider === 'opencode' ? 'local' : null;
+  return mode === 'external' && EXTERNAL.has(provider) ? (provider as ModelProfile) : null;
+}
+
+type Check = Awaited<ReturnType<HostSources['probeGateway']>>;
+
+/** A per-agent reason from one gateway check, or null when the agent is ready. */
+function checkReason(result: Check | Error): string | null {
+  if (result instanceof Error) return 'gateway_unreachable';
+  if (result === null) return 'gateway_check_unsupported';
+  if (result.from === 'proxy') return 'gateway_denied';
+  if (result.status === 401 || result.status === 403) return 'credential_missing';
+  // Rate limiting still proves a working credential.
+  return result.status === 200 || result.status === 429 ? null : 'provider_unreachable';
+}
+
+function listedModels(body: unknown): string[] {
+  const data = (body as { data?: unknown } | null)?.data;
+  return Array.isArray(data)
+    ? data.map((item) => (item as { id?: unknown })?.id).filter((id): id is string => typeof id === 'string')
+    : [];
+}
+
+async function checkAgents(sources: HostSources, ids: string[], profile: Profile) {
+  const results = new Map<string, Check | Error>();
+  const names = new Map(
+    (await getDb().all<{ id: string; name: string }>('SELECT id, name FROM agent_groups')).map((row) => [
+      row.id,
+      row.name,
+    ]),
+  );
+  const queue = [...ids];
+  await Promise.all(
+    Array.from({ length: Math.min(CHECK_CONCURRENCY, queue.length) }, async () => {
+      for (let id = queue.shift(); id !== undefined; id = queue.shift()) {
+        results.set(
+          id,
+          await sources
+            .probeGateway(id, names.get(id) ?? id, profile.check!.url, profile.check!.headers)
+            .catch((error: unknown) => (error instanceof Error ? error : new Error('probe failed'))),
+        );
+      }
+    }),
+  );
+  return results;
 }
 
 const preflights = new Map<string, Pending>();
@@ -94,27 +183,44 @@ export async function preflightModelChange(
 ): Promise<Preflight> {
   const now = sources.now();
   const ids = await groupIds();
+  const name = profileOf(body.mode, body.provider);
+  const profile = name ? PROFILES[name] : null;
+  const stored = profile ? `${profile.prefix}${body.model}` : body.model;
   let reason: string | null = null;
-  if (body.mode !== 'local' || body.provider !== PROVIDER) reason = 'provider_unsupported';
-  else if (!getProviderContainerConfig(PROVIDER)) reason = 'provider_not_installed';
-  else if (!body.endpoint) reason = 'endpoint_required';
-  else if (validate(modelName, `${BACKEND}/${body.model}`).length) reason = 'model_invalid';
+  if (!profile) reason = 'provider_unsupported';
+  else if (profile.provider === 'opencode' && !getProviderContainerConfig('opencode'))
+    reason = 'provider_not_installed';
+  else if (name === 'local' ? !body.endpoint : body.endpoint !== null) reason = 'endpoint_invalid';
+  else if (validate(modelName, stored).length) reason = 'model_invalid';
   else if (ids.length > MAX_AGENTS) reason = 'too_many_agents';
 
   let models: string[] = [];
   let contextLimit: number | null = null;
-  if (!reason) {
+  const perAgent = new Map<string, string | null>();
+  if (!reason && name === 'local') {
     const probe = await sources.probeModel(body.endpoint!, body.model);
     reason = probe.reason;
     models = probe.models;
     contextLimit = probe.contextLimit;
+  } else if (!reason && profile?.check) {
+    const results = await checkAgents(sources, ids, profile);
+    for (const id of ids) perAgent.set(id, checkReason(results.get(id)!));
+    const unsupported = [...perAgent.values()].includes('gateway_check_unsupported');
+    if (unsupported) reason = 'gateway_check_unsupported';
+    const listing = [...results.values()].find(
+      (result): result is Exclude<Check, null> => !(result instanceof Error) && result?.status === 200,
+    );
+    if (!reason && profile.check.lists && listing) {
+      models = listedModels(listing.body);
+      if (!models.includes(body.model)) reason = 'model_not_found';
+    }
   }
 
   const sessions = await getDb().all<{ agent_group_id: string; status: string; container_status: string }>(
     'SELECT agent_group_id, status, container_status FROM sessions',
   );
   const agents = ids.slice(0, MAX_AGENTS).map((id) => {
-    const own = reason ?? (restarting.has(id) ? 'restart_in_progress' : null);
+    const own = reason ?? perAgent.get(id) ?? (restarting.has(id) ? 'restart_in_progress' : null);
     return { id: publicId('agent', id, sources.idKey), ready: own === null, reason: own };
   });
   const ready = reason === null && agents.every((agent) => agent.ready);
@@ -123,8 +229,9 @@ export async function preflightModelChange(
   const id = `pfl_${randomBytes(8).toString('hex')}`;
   const expires = now.getTime() + PREFLIGHT_TTL_MS;
   preflights.set(id, {
-    endpoint: body.endpoint ?? '',
-    model: `${BACKEND}/${body.model}`,
+    profile: name ?? 'local',
+    endpoint: name === 'local' ? (body.endpoint ?? '') : name === 'claude' ? null : 'native',
+    model: stored,
     contextLimit,
     groups: ids.join('\n'),
     expires,
@@ -134,7 +241,7 @@ export async function preflightModelChange(
     preflight_id: id,
     ready,
     reason,
-    leaves_lan: false,
+    leaves_lan: name !== null && name !== 'local',
     agents,
     sessions_to_restart: sessions.filter(
       (session) =>
@@ -207,7 +314,7 @@ function readJournal(dataDir: string): Journal | null {
   return value;
 }
 
-async function snapshot(dataDir: string, jobId: string): Promise<Journal> {
+async function snapshot(dataDir: string, jobId: string, provider: string): Promise<Journal> {
   const db = getDb();
   const rows = new Map(
     (
@@ -226,7 +333,7 @@ async function snapshot(dataDir: string, jobId: string): Promise<Journal> {
     }),
     sessions: await db.all<{ id: string; agent_provider: string | null }>(
       `SELECT id, agent_provider FROM sessions WHERE agent_provider IS NOT NULL AND lower(agent_provider) <> ?`,
-      PROVIDER,
+      provider,
     ),
   };
   writePrivateFileAtomic(journalPath(dataDir), `${JSON.stringify(journal)}\n`);
@@ -320,18 +427,22 @@ async function restartAll(sources: HostSources, ids: string[]): Promise<void> {
 
 async function run(sources: HostSources, record: Job, pending: Pending): Promise<void> {
   const { dataDir } = sources;
+  const profile = PROFILES[pending.profile];
+  const provider = profile.provider;
   const settings: ModelSettings = {
     version: 1,
-    provider: PROVIDER,
-    backend: BACKEND,
+    profile: pending.profile,
+    provider,
+    backend: profile.backend,
     endpoint: pending.endpoint,
+    auth_mode: profile.auth,
     model: pending.model,
     context_limit: pending.contextLimit,
     applied_at: new Date().toISOString(),
   };
   let journal: Journal;
   try {
-    journal = await snapshot(dataDir, record.id);
+    journal = await snapshot(dataDir, record.id, provider);
   } catch {
     log.error('Model settings change failed before any change', { job: record.id, phase: 'snapshot' });
     finish(dataDir, record, sources.now(), 'failed', 'not_needed', 'snapshot_failed');
@@ -348,17 +459,17 @@ async function run(sources: HostSources, record: Job, pending: Pending): Promise
     const at = new Date().toISOString();
     await db.transaction(async () => {
       for (const id of ids) {
-        await ensureContainerConfig(id, PROVIDER);
+        await ensureContainerConfig(id, provider);
         await db.run(
           'UPDATE container_configs SET provider = ?, model = ?, updated_at = ? WHERE agent_group_id = ?',
-          PROVIDER,
+          provider,
           settings.model,
           at,
           id,
         );
       }
       for (const session of journal.sessions) {
-        await db.run('UPDATE sessions SET agent_provider = ? WHERE id = ?', PROVIDER, session.id);
+        await db.run('UPDATE sessions SET agent_provider = ? WHERE id = ?', provider, session.id);
       }
     });
 
@@ -370,10 +481,16 @@ async function run(sources: HostSources, record: Job, pending: Pending): Promise
     failure = 'verify_failed';
     const stored = readModelSettings(dataDir);
     if (stored?.endpoint !== settings.endpoint || stored.model !== settings.model) throw new Error('settings');
-    if (!(await rowsMatch(() => ({ provider: PROVIDER, model: settings.model })))) throw new Error('rows');
-    const probe = await sources.probeModel(settings.endpoint, settings.model.slice(BACKEND.length + 1));
-    if (probe.reason) {
-      failure = probe.reason;
+    if (!(await rowsMatch(() => ({ provider, model: settings.model })))) throw new Error('rows');
+    // The target still answers: the endpoint serves the model, or the provider takes the first agent's credential.
+    const answer =
+      pending.profile === 'local'
+        ? (await sources.probeModel(settings.endpoint!, settings.model.slice(profile.prefix.length))).reason
+        : checkReason(
+            (await checkAgents(sources, ids.slice(0, 1), profile)).get(ids[0]) ?? new Error('no agent to check'),
+          );
+    if (answer && !(pending.profile !== 'local' && ids.length === 0)) {
+      failure = answer;
       throw new Error('probe');
     }
 

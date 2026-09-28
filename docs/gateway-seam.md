@@ -112,6 +112,17 @@ driver realizes it (`src/drivers/index.ts`) or rejects it. Egress lockdown
 (`src/egress-lockdown.ts`) accepts only `runtime` targets, because only a named
 runtime object can be attached to the internal network.
 
+**`probes.get` is an optional read-only check.** One GET to a provider URL as
+the agent group would make it, with the credential the gateway injects for
+that group. Core uses it before a provider switch (the dashboard's model
+change) to confirm every group really has a working credential. It must not
+grant credentials, change policy, trigger approvals on purpose or log the
+answer. It returns only the status, whether the target or the gateway itself
+answered, and a small JSON body. OneCLI implements it by tunnelling through
+the agent's own proxy URL and trusting only OneCLI's CA
+(`src/gateway-providers/probe-through-proxy.ts`). A gateway without it makes
+external provider switches unavailable, never silently unchecked.
+
 **Approvals are a subscription, not a workflow.** `subscribe` translates the
 provider's native events into `GatewayApprovalRequest` and awaits a decision.
 It never talks to a channel, never touches `pending_approvals`, and never

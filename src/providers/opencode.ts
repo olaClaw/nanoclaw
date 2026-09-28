@@ -12,7 +12,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { readEnvFile } from '../env.js';
-import { applyOpenCodeOverrides } from '../model-settings.js';
+import { applyOpenCodeOverrides, openCodeAuthModeOverride } from '../model-settings.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
 
 const PASSTHROUGH_KEYS = [
@@ -69,7 +69,8 @@ registerProviderContainerConfig('opencode', (ctx) => {
   const mounts = ctx.coreOwnsProviderSurfaces
     ? []
     : [{ hostPath: opencodeDir, containerPath: '/opencode-xdg', readonly: false }];
-  const authMode: string | undefined = ctx.hostEnv[AUTH_MODE_KEY] ?? dotenv[AUTH_MODE_KEY];
+  const authMode: string | undefined =
+    openCodeAuthModeOverride() ?? ctx.hostEnv[AUTH_MODE_KEY] ?? dotenv[AUTH_MODE_KEY];
   // The container initializes its own non-secret auth state before server startup.
   env[AUTH_MODE_KEY] = authMode === 'chatgpt' ? 'chatgpt' : 'api-key';
 

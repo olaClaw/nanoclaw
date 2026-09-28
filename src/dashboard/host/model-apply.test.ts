@@ -47,6 +47,7 @@ function sources(changes: Partial<HostSources> = {}): HostSources {
     }),
     dataDir,
     probeModel: (endpoint, model) => probe(endpoint, model),
+    probeGateway: async () => null,
     endpointState: async () => 'reachable',
     ...changes,
   };
@@ -143,11 +144,14 @@ describe('model change preflight', () => {
     expect(body.available_models).toEqual(['fixture-model-a', 'fixture-model-b']);
   });
 
-  it('refuses external providers, a missing endpoint and a failed probe for every agent', async () => {
+  it('refuses unknown pairs, a missing endpoint and a failed probe for every agent', async () => {
     for (const [body, reason] of [
-      [{ mode: 'external', provider: 'claude', endpoint: null }, 'provider_unsupported'],
+      [{ mode: 'external', provider: 'openrouter', endpoint: null }, 'provider_unsupported'],
       [{ provider: 'claude' }, 'provider_unsupported'],
-      [{ endpoint: null }, 'endpoint_required'],
+      [{ endpoint: null }, 'endpoint_invalid'],
+      [{ mode: 'external', provider: 'claude', endpoint: ENDPOINT }, 'endpoint_invalid'],
+      // The gateway cannot check credentials: nobody is ready.
+      [{ mode: 'external', provider: 'claude', endpoint: null }, 'gateway_check_unsupported'],
     ] as const) {
       const response = (await preflight(body)).body as {
         ready: boolean;
@@ -160,6 +164,152 @@ describe('model change preflight', () => {
     probe = async () => ({ reason: 'model_not_found', models: ['fixture-model-a'], contextLimit: null });
     const missing = (await preflight()).body as { ready: boolean; reason: string; available_models: string[] };
     expect(missing).toMatchObject({ ready: false, reason: 'model_not_found', available_models: ['fixture-model-a'] });
+  });
+});
+
+describe('external providers', () => {
+  const CLAUDE = { mode: 'external', provider: 'claude', model: 'claude-fixture-5', endpoint: null };
+  type Answer = { status: number; from: 'upstream' | 'proxy'; body: unknown };
+  const listing = (...ids: string[]): Answer => ({
+    status: 200,
+    from: 'upstream',
+    body: { data: ids.map((id) => ({ id })) },
+  });
+  const gateway = (answers: (agent: string) => Answer | Error) =>
+    sources({
+      probeGateway: async (agent: string) => {
+        const answer = answers(agent);
+        if (answer instanceof Error) throw answer;
+        return answer;
+      },
+    });
+  const agentsOf = (body: unknown) =>
+    Object.fromEntries(
+      (body as { agents: Array<{ id: string; reason: string | null }> }).agents.map((agent) => [
+        agent.id,
+        agent.reason,
+      ]),
+    );
+
+  it('checks every agent through the gateway and warns that the context leaves the LAN', async () => {
+    const seen: string[] = [];
+    const host = sources({
+      probeGateway: async (agent: string, _name: string, url: string, headers?: Record<string, string>) => {
+        seen.push(`${agent} ${url} ${headers?.['anthropic-version'] ?? '-'}`);
+        return listing('claude-fixture-5', 'claude-fixture-4');
+      },
+    });
+    const body = (await preflight(CLAUDE, host)).body;
+    expect(body).toMatchObject({
+      ready: true,
+      reason: null,
+      leaves_lan: true,
+      available_models: ['claude-fixture-5', 'claude-fixture-4'],
+    });
+    expect(seen.sort()).toEqual(
+      [LOOSE, SYNTHETIC.agents.helper.id, SYNTHETIC.agents.main.id]
+        .sort()
+        .map((agent) => `${agent} https://api.anthropic.com/v1/models 2023-06-01`),
+    );
+  });
+
+  it('blocks the whole change when one agent lacks the credential, and names why', async () => {
+    const helper = publicId('agent', SYNTHETIC.agents.helper.id, KEY);
+    const main = publicId('agent', SYNTHETIC.agents.main.id, KEY);
+    const loose = publicId('agent', LOOSE, KEY);
+    const host = gateway((agent) =>
+      agent === SYNTHETIC.agents.helper.id
+        ? { status: 401, from: 'upstream', body: null }
+        : agent === LOOSE
+          ? { status: 407, from: 'proxy', body: null }
+          : listing('claude-fixture-5'),
+    );
+    const response = await preflight(CLAUDE, host);
+    expect(response.body).toMatchObject({ ready: false, reason: null });
+    expect(agentsOf(response.body)).toEqual({
+      [helper]: 'credential_missing',
+      [loose]: 'gateway_denied',
+      [main]: null,
+    });
+    const id = (response.body as { preflight_id: string }).preflight_id;
+    const refused = await call('POST', '/api/v1/model-settings/apply', { preflight_id: id, confirm: true }, host);
+    expect((refused.body as { error: { code: string } }).error.code).toBe('preflight_not_ready');
+    // An unreachable gateway is a per-agent reason too.
+    const down = gateway(() => new Error('ECONNREFUSED'));
+    expect(new Set(Object.values(agentsOf((await preflight(CLAUDE, down)).body)))).toEqual(
+      new Set(['gateway_unreachable']),
+    );
+  });
+
+  it('refuses a model the provider does not list, and accepts the subscription without a list', async () => {
+    const host = gateway(() => listing('claude-other'));
+    expect((await preflight(CLAUDE, host)).body).toMatchObject({ ready: false, reason: 'model_not_found' });
+    const seen: string[] = [];
+    const chatgpt = sources({
+      probeGateway: async (_agent: string, _name: string, url: string) => {
+        seen.push(url);
+        return { status: 200, from: 'upstream', body: { email: CANARIES.email } };
+      },
+    });
+    const response = await call(
+      'POST',
+      '/api/v1/model-settings/preflight',
+      { mode: 'external', provider: 'chatgpt', model: 'gpt-fixture', endpoint: null },
+      chatgpt,
+    );
+    expect(response.body).toMatchObject({ ready: true, leaves_lan: true, available_models: [] });
+    expect(new Set(seen)).toEqual(new Set(['https://chatgpt.com/backend-api/me']));
+  });
+
+  it('switches every group to Claude with the panel settings, and back on failure', async () => {
+    const host = gateway(() => listing('claude-fixture-5'));
+    const id = ((await preflight(CLAUDE, host)).body as { preflight_id: string }).preflight_id;
+    const accepted = await call('POST', '/api/v1/model-settings/apply', { preflight_id: id, confirm: true }, host);
+    const record = await job((accepted.body as { job: { id: string } }).job.id, host);
+    expect(record).toMatchObject({ outcome: 'succeeded' });
+    expect(new Set((await rows()).map((row) => `${row.provider} ${row.model}`))).toEqual(
+      new Set(['claude claude-fixture-5']),
+    );
+    expect(readModelSettings(dataDir)).toMatchObject({
+      profile: 'claude',
+      provider: 'claude',
+      backend: null,
+      endpoint: null,
+      auth_mode: null,
+      model: 'claude-fixture-5',
+    });
+    // The pinned Claude session already matches: nothing to change there.
+    expect(await pins()).toEqual([{ id: PINNED, agent_provider: 'claude' }]);
+
+    // OpenAI API next; the credential stops working right after the switch.
+    let calls = 0;
+    const flaky = gateway(() =>
+      ++calls <= 3 ? listing('gpt-fixture') : { status: 401, from: 'upstream', body: null },
+    );
+    const before = await rows();
+    const again = (
+      await call(
+        'POST',
+        '/api/v1/model-settings/preflight',
+        { mode: 'external', provider: 'openai', model: 'gpt-fixture', endpoint: null },
+        flaky,
+      )
+    ).body as { preflight_id: string; ready: boolean };
+    expect(again.ready).toBe(true);
+    const failing = await call(
+      'POST',
+      '/api/v1/model-settings/apply',
+      { preflight_id: again.preflight_id, confirm: true },
+      flaky,
+    );
+    const rolled = await job((failing.body as { job: { id: string } }).job.id, flaky);
+    expect(rolled).toMatchObject({
+      outcome: 'rolled_back',
+      rollback: 'healthy',
+      failure_category: 'credential_missing',
+    });
+    expect(await rows()).toEqual(before);
+    expect(readModelSettings(dataDir)?.profile).toBe('claude');
   });
 });
 

@@ -5,6 +5,7 @@ import { OneCLI, ApprovalClient, type ContainerConfig, type ApprovalRequest } fr
 import { DATA_DIR } from '../config.js';
 import { combinedCaBundle, stageOnecliFile } from './onecli-files.js';
 import { readEnvFile } from '../env.js';
+import { probeThroughProxy } from './probe-through-proxy.js';
 import { log } from '../log.js';
 
 import {
@@ -230,8 +231,33 @@ function buildQuestion(request: ApprovalRequest, agentName: string): string {
   return lines.join('\n').slice(0, 2_600);
 }
 
+/** A credential check as the agent group: its OneCLI agent, its proxy token, OneCLI's CA. */
+async function probeGet(input: {
+  agentGroupId: string;
+  groupName: string;
+  url: string;
+  headers?: Record<string, string>;
+}): Promise<{ status: number; from: 'upstream' | 'proxy'; body: unknown }> {
+  await onecli.ensureAgent({ name: input.groupName, identifier: input.agentGroupId });
+  const config = await onecli.getContainerConfig({ agent: input.agentGroupId });
+  const proxyUrl = config.env.HTTPS_PROXY || config.env.https_proxy;
+  if (!proxyUrl) throw new Error('OneCLI returned no proxy for the agent');
+  // Agents reach the gateway as host.docker.internal; this process reaches the
+  // same container by its Compose name, or on loopback outside Compose.
+  const agentSide = new URL(proxyUrl).hostname === 'host.docker.internal';
+  const inCompose = Boolean(process.env.ONECLI_GATEWAY_CONTAINER || env.ONECLI_GATEWAY_CONTAINER);
+  return probeThroughProxy({
+    proxyUrl,
+    proxyHost: agentSide ? (inCompose ? gatewayContainer : '127.0.0.1') : undefined,
+    ca: config.caCertificate,
+    url: input.url,
+    headers: input.headers,
+  });
+}
+
 registerGatewayProvider({
   kind: 'onecli',
+  probes: { get: probeGet },
   connections: {
     async connect() {
       const consoleUrl = process.env.ONECLI_CONSOLE_URL || env.ONECLI_CONSOLE_URL;
